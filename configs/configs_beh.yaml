@@ -1,7 +1,7 @@
 model_opts:
   model: Static
   backbone: vgg16
-  obs_input_type: [box, pose, local_context]
+  obs_input_type: [box, local_context]
   enlarge_ratio: 1.5 # enlarging the original bounding box to capture local spatial context
   obs_length: 16
   time_to_event: 30
@@ -12,22 +12,22 @@ model_opts:
   normalize_boxes: True
   data_augmentation: True
   generator: True # using generator is slower but uses less memory, otherwise up to 64GB RAM may be required to run some of the models
-  path_to_pose: ./data/JAAD/poses
+  obs_seconds: 1
   batch_size: 64
   val_batch_size: 171
   dropout: 0.1
   interval: 30
-  classifier_activation: sigmoid
-  classifier_loss: binary_crossentropy
+  classifier_activation: softmax
+  classifier_loss: sparse_categorical_crossentropy
   epochs: 500
   optimizer: sgd
   lr: 0.001
   model_path: ./models
   step: 3
   seq_len: 136
-  feat_size: [4, 36, 512] 
-  negative_weight: 0.3
-  positive_weight: 0.7
+  feat_size: [4, 512]
+  num_classes: 5
+  class_weights: [1.0, 1.0, 1.0, 1.0, 1.0]
 data_opts:
   fstride: 1
   sample_type: beh  # all or beh only when model_opts/dataset is set to jaad

@@ -18,9 +18,7 @@ session_conf = tf.compat.v1.ConfigProto(intra_op_parallelism_threads=10, inter_o
 sess = tf.compat.v1.Session(graph=tf.compat.v1.get_default_graph(), config=session_conf)
 K.set_session(sess)
 
-from tensorflow.keras.metrics import AUC
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, mean_squared_error, mean_absolute_error
-from sklearn.metrics import roc_auc_score, roc_curve, precision_recall_curve
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
 from tensorflow.keras.optimizers import Adam, SGD, RMSprop
 from tensorflow import keras
 
@@ -30,8 +28,12 @@ def run(config_path, auxiliary_loss, test, resume):
         configs = yaml.safe_load(f)
 
     print(configs['model_opts']['dataset'], '--------------------------------------')
-    tte = configs['model_opts']['time_to_event']
-    configs['data_opts']['min_track_size'] = configs['model_opts']['obs_length'] + 2*tte
+    fps = max(1, int(configs['model_opts'].get('interval', 30) / max(1, configs['data_opts'].get('fstride', 1))))
+    obs_seconds = configs['model_opts'].get('obs_seconds', 1)
+    configs['model_opts']['obs_length'] = max(1, int(obs_seconds * fps))
+    configs['model_opts']['seq_len'] = configs['model_opts']['obs_length']
+    configs['model_opts']['fstride'] = configs['data_opts'].get('fstride', 1)
+    configs['data_opts']['min_track_size'] = configs['model_opts']['obs_length']
 
     if configs['model_opts']['dataset'] == 'jaad':
         imdb = JAAD(data_path= configs['data_opts']['path_to_dataset'])
@@ -44,7 +46,7 @@ def run(config_path, auxiliary_loss, test, resume):
 
     data_getter_train = DataGetter('train', data_raw_train, configs['model_opts'])
     data_getter_test = DataGetter('test', data_raw_test, configs['model_opts'])
-    data_getter_val = DataGetter('val', data_raw_test, configs['model_opts'])
+    data_getter_val = DataGetter('val', data_raw_val, configs['model_opts'])
 
     data_train = data_getter_train.get_data()
     test_data = data_getter_test.get_data()
@@ -62,13 +64,11 @@ def run(config_path, auxiliary_loss, test, resume):
     if not test:
         class_w = class_weights(configs['model_opts']['apply_class_weights'],
                                      data_train['count'],
-                                     configs['model_opts']['negative_weight'],
-                                     configs['model_opts']['positive_weight'])
+                                     configs['model_opts'])
         optimizer = get_optimizer(configs['model_opts']['optimizer'])(learning_rate=configs['model_opts']['lr'])
-        w = [class_w[0], class_w[1]]
-        tamformer.compile(loss=weighted_binary_crossentropy(weights=w),
+        tamformer.compile(loss=weighted_sparse_categorical_crossentropy(weights=class_w),
                           optimizer=optimizer,
-                          metrics=['accuracy'])
+                          metrics=['sparse_categorical_accuracy'])
 
         checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(filepath=model_name,
                                                                  save_weights_only=True,
@@ -88,87 +88,61 @@ def run(config_path, auxiliary_loss, test, resume):
 
     print("Testing ...")
     test_results = tamformer.predict(test_data['data'][0], verbose=1)
-    best_perf_acc = [0 for i in range(40)]
-    best_perf_auc = [0 for i in range(40)]
-    best_perf_f1 = [0 for i in range(40)]
-    AT = np.flip(np.arange(0, 4.1, 0.1))
-    for t in np.arange(0.01, 1.0, 0.01):
-       test_results_array = np.array([np.where(test_results[i]>=t, 1, 0) for i in range(40)])
-       average = 'binary'
-       multi_class = 'raise'
-       count = 0
-       index = int(configs['model_opts']['interval']/configs['model_opts']['step'])
-       masking_index = (test_data['data'][2]/configs['model_opts']['step']).astype(int)
-       for i in range(len(test_results)):
-           rev_index = int((configs['model_opts']['seq_len']-configs['model_opts']['obs_length'])/configs['model_opts']['step'])\
-                            + int(configs['model_opts']['obs_length']/configs['model_opts']['step']) - i
-           acc = accuracy(test_data['data'][1][0][i], test_results_array[i], rev_index, masking_index)
-           f1 = score_f1(test_data['data'][1][0][i], test_results_array[i], rev_index, masking_index, average=average)
-           auc = score_auc(test_data['data'][1][0][i], test_results_array[i], rev_index, masking_index, multi_class=multi_class)
-           precision = score_precision(test_data['data'][1][0][i], test_results_array[i], rev_index, masking_index, average=average)
-           recall = score_recall(test_data['data'][1][0][i], test_results_array[i], rev_index, masking_index, average=average)
+    y_true = np.asarray(test_data['data'][1]).astype(int)
+    y_pred = np.argmax(test_results, axis=1)
+    num_classes = configs['model_opts'].get('num_classes', 5)
 
-           if best_perf_f1[count]+best_perf_auc[count]<=f1+auc:
-               best_perf_f1[count] = f1
-               best_perf_auc[count] = auc
-               best_perf_acc[count] = acc
-           count += 1
-    count = 0
-    for i in range(len(test_results)):
-        print(AT[count],':' ,'acc:', best_perf_acc[count], '- auc:', best_perf_auc[count], '- f1:', best_perf_f1[count])
-        count += 1
+    acc = accuracy_score(y_true, y_pred)
+    f1_macro = f1_score(y_true, y_pred, average='macro', zero_division=0)
+    f1_weighted = f1_score(y_true, y_pred, average='weighted', zero_division=0)
+    precision_macro = precision_score(y_true, y_pred, average='macro', zero_division=0)
+    recall_macro = recall_score(y_true, y_pred, average='macro', zero_division=0)
 
-def accuracy(true, pred, index, masking_index):
-    masking_index = masking_index >= index
-    y_true =  np.array([true[i] for i in range(len(masking_index)) if masking_index[i]==1])
-    y_pred =  np.array([pred[i] for i in range(len(masking_index)) if masking_index[i]==1])
-    return accuracy_score(y_true, y_pred)
+    try:
+        y_true_one_hot = keras.utils.to_categorical(y_true, num_classes=num_classes)
+        auc_macro = roc_auc_score(y_true_one_hot, test_results, multi_class='ovr', average='macro')
+    except ValueError:
+        auc_macro = 0.0
 
-def score_f1(true, pred, index, masking_index, average):
-    masking_index = masking_index >= index
-    y_true =  np.array([true[i] for i in range(len(masking_index)) if masking_index[i]==1])
-    y_pred =  np.array([pred[i] for i in range(len(masking_index)) if masking_index[i]==1])
-    return f1_score(y_true, y_pred, average=average)
+    print('acc:', acc,
+          '- auc_macro_ovr:', auc_macro,
+          '- f1_macro:', f1_macro,
+          '- f1_weighted:', f1_weighted,
+          '- precision_macro:', precision_macro,
+          '- recall_macro:', recall_macro)
 
-def score_auc(true, pred, index, masking_index, multi_class):
-    masking_index = masking_index >= index
-    y_true =  np.array([true[i] for i in range(len(masking_index)) if masking_index[i]==1])
-    y_pred =  np.array([pred[i] for i in range(len(masking_index)) if masking_index[i]==1])
-    return roc_auc_score(y_true, y_pred, multi_class=multi_class)
-
-def score_precision(true, pred, index, masking_index, average):
-    masking_index = masking_index >= index
-    y_true =  np.array([true[i] for i in range(len(masking_index)) if masking_index[i]==1])
-    y_pred =  np.array([pred[i] for i in range(len(masking_index)) if masking_index[i]==1])
-    return precision_score(y_true, y_pred, average=average)
-
-def score_recall(true, pred, index, masking_index, average):
-    masking_index = masking_index >= index
-    y_true =  np.array([true[i] for i in range(len(masking_index)) if masking_index[i]==1])
-    y_pred =  np.array([pred[i] for i in range(len(masking_index)) if masking_index[i]==1])
-    return recall_score(y_true, y_pred, average=average)
-
-
-def class_weights(apply_weights, sample_count, w_neg, w_pos):
+def class_weights(apply_weights, sample_count, model_opts):
     if not apply_weights:
         return None
 
-    total = sample_count['neg_count'] + sample_count['pos_count']
-    neg_weight = w_neg #sample_count['pos_count']/total
-    pos_weight = w_pos #sample_count['neg_count']/total
+    class_count = sample_count.get('class_count', {})
+    num_classes = model_opts.get('num_classes', 5)
+    configured_weights = model_opts.get('class_weights', [1.0] * num_classes)
+    if len(configured_weights) != num_classes:
+        configured_weights = [1.0] * num_classes
 
-    print("### Class weights: negative {:.3f} and positive {:.3f} ###".format(neg_weight, pos_weight))
-    return {0: neg_weight, 1: pos_weight}
+    if not class_count:
+        return configured_weights
+
+    total = sum(class_count.values())
+    weights = []
+    for class_id in range(num_classes):
+        count = class_count.get(class_id, 0)
+        inv_freq = (total / (num_classes * count)) if count else 1.0
+        weights.append(float(configured_weights[class_id]) * float(inv_freq))
+    print("### Class weights:", weights, "###")
+    return weights
 
 
-def weighted_binary_crossentropy(weights, out_weight=1.0):
+def weighted_sparse_categorical_crossentropy(weights=None, out_weight=1.0):
     def loss_func(y_true, y_pred):
-        tf_y_true = tf.cast(y_true, dtype=y_pred.dtype)
-        tf_y_pred = tf.cast(y_pred, dtype=y_pred.dtype)
-        weights_v = tf.where(tf.equal(tf_y_true, 1), weights[1], weights[0])
-        ce = K.binary_crossentropy(y_pred, y_true)
-        loss = K.mean(tf.multiply(ce, weights_v))
-        return loss*out_weight
+        y_true_int = tf.cast(y_true, tf.int32)
+        ce = tf.keras.losses.sparse_categorical_crossentropy(y_true_int, y_pred)
+        if weights is None:
+            return K.mean(ce) * out_weight
+        class_weights_tensor = tf.constant(weights, dtype=y_pred.dtype)
+        sample_weights = tf.gather(class_weights_tensor, y_true_int)
+        return K.mean(ce * sample_weights) * out_weight
     return loss_func
 
 

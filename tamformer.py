@@ -103,56 +103,47 @@ class TAMformer(object):
     def tamformer(self):
         num_modalities = len(self.model_opts['obs_input_type'])
         feat_sizes =  self.model_opts['feat_size']
-        inputs = [Input((136, feat_sizes[i])) for i in range(num_modalities)]
-        embeddings = [PositionEmbedding(136, feat_sizes[i])(inputs[i]) for i in range(num_modalities)]
-        sampled_embd = [Lambda(lambda s: s[:,1::self.model_opts['step']])(embeddings[i]) for i in range(num_modalities)]
+        obs_length = self.model_opts['obs_length']
+        num_classes = self.model_opts.get('num_classes', 5)
+        inputs = [Input((obs_length, feat_sizes[i])) for i in range(num_modalities)]
+        embeddings = [PositionEmbedding(obs_length, feat_sizes[i])(inputs[i]) for i in range(num_modalities)]
         concatenated_inputs = Concatenate(axis=-1)(inputs)
-        sampled_concatenated_inputs = Lambda(lambda s: s[:,self.model_opts['obs_length']::self.model_opts['step']])(concatenated_inputs)
+        current_query = Lambda(lambda s: s[:, -1:, :])(concatenated_inputs)
 
 
-        masking_models_136 = [masking_models(final_out=i) for i in range(1,137)]
-        masking_models_40 = [masking_models(final_out=i) for i in range(16,136,3)]
+        masking_models_obs = [masking_models(final_out=i + 1) for i in range(obs_length)]
 
-        masks_136 = [tf.expand_dims(masking_models_136[i](Lambda(lambda s, i=i: s[:,i])(concatenated_inputs)), 1) for i in range(136)]
-        masks_136 = [tf.keras.layers.ZeroPadding1D((0, 136-masks_136[i].shape[-1]))(tf.transpose(masks_136[i], [0,2,1])) for i in range(136)]
-        masks_136 = [tf.transpose(masks_136[i], [0,2,1]) for i in range(136)]
-        masks_136 = Concatenate(axis=1)(masks_136)
-
-        masks_40 = [tf.expand_dims(masking_models_40[i](Lambda(lambda s, i=i: s[:,i])(sampled_concatenated_inputs)), 1) for i in range(40)]
-        masks_40 = [tf.keras.layers.ZeroPadding1D((0, 136-masks_40[i].shape[-1]))(tf.transpose(masks_40[i], [0,2,1])) for i in range(40)]
-        masks_40 = [tf.transpose(masks_40[i], [0,2,1]) for i in range(40)]
-        masks_40 = Concatenate(axis=1)(masks_40)
+        masks_obs = [tf.expand_dims(masking_models_obs[i](Lambda(lambda s, i=i: s[:,i])(concatenated_inputs)), 1)
+                     for i in range(obs_length)]
+        masks_obs = [tf.keras.layers.ZeroPadding1D((0, obs_length - masks_obs[i].shape[-1]))(tf.transpose(masks_obs[i], [0,2,1]))
+                     for i in range(obs_length)]
+        masks_obs = [tf.transpose(masks_obs[i], [0,2,1]) for i in range(obs_length)]
+        masks_obs = Concatenate(axis=1)(masks_obs)
 
         transformer_blocks = [TransformerBlock(feat_sizes[i], 6, 1024, normalization=True, cross_attention=False)\
-                                              (embeddings[i],attention_mask=masks_136) for i in range(num_modalities)]
+                                              (embeddings[i],attention_mask=masks_obs) for i in range(num_modalities)]
 
         concatenated_encodings = Concatenate(axis=-1)(transformer_blocks)
         query_transformer = TransformerBlock(sum(feat_sizes), 6, 1024, normalization=True, cross_attention=True)\
-                                            ([sampled_concatenated_inputs, concatenated_inputs], attention_mask=masks_40)
+                                            ([current_query, concatenated_inputs], attention_mask=None)
 
         cross_transformer_block = TransformerBlock(sum(feat_sizes), 6, 1024, normalization=True, cross_attention=True)\
-                                                  ([query_transformer, concatenated_encodings], attention_mask=masks_40)
+                                                  ([query_transformer, concatenated_encodings], attention_mask=None)
 
-        outputs = []
-        for i in range(40):
-            x1 = Lambda(lambda s, i=i: s[:,i])(cross_transformer_block)
-            x2 = Dropout(0.1)(x1)
-            x3 = Dense(64, activation='relu')(x2)
-            x4 = Dropout(0.1)(x3)
-            x5 = Dense(32, activation='relu')(x4)
-            x6 = Dropout(0.1)(x5)
-            x7 = Dense(1, activation='sigmoid', name='output_'+str(i))(x6)
-            outputs.append(x7)
+        x1 = Lambda(lambda s: s[:,0])(cross_transformer_block)
+        x2 = Dropout(0.1)(x1)
+        x3 = Dense(64, activation='relu')(x2)
+        x4 = Dropout(0.1)(x3)
+        x5 = Dense(32, activation='relu')(x4)
+        x6 = Dropout(0.1)(x5)
+        outputs = Dense(num_classes, activation='softmax', name='output')(x6)
 
         model = Model(inputs, outputs, name='tamformer')
 
         if self.auxiliary_loss:
             to_add_losses = []
-            for i in range(40):
-                #ce = K.binary_crossentropy(tf.round(o), tf.round(outputs[-1])) #L_r could be the ce with the closest prediction
-                mse = K.square(Lambda(lambda s, i=i: s[:,i])(cross_transformer_block) - Lambda(lambda s, i=i: s[:,-1])(cross_transformer_block))
-                loss = K.mean(mse)
-                to_add_losses.append(loss)
+            mse = K.square(Lambda(lambda s: s[:,0])(cross_transformer_block) - Lambda(lambda s: s[:,0])(query_transformer))
+            to_add_losses.append(K.mean(mse))
             model.add_loss(to_add_losses)
 
         return model

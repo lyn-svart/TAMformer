@@ -1001,6 +1001,21 @@ class JAAD(object):
         """
         return [(box[0] + box[2]) / 2, (box[1] + box[3]) / 2]
 
+    def _map_motion_class(self, action, crossing):
+        """
+        Maps JAAD behavior tags into a canonical 5-class motion label.
+        0: standing, 1: walking, 2: starting_to_move, 3: running, 4: stopping
+        """
+        if action == 0 and crossing == 0:
+            return 0  # standing
+        if action == 1 and crossing == 0:
+            return 4  # stopping
+        if action == 0 and crossing == 1:
+            return 2  # starting_to_move
+        if action == 1 and crossing == 1:
+            return 1  # walking
+        return 3  # running (fallback/rare transition)
+
     def generate_data_trajectory_sequence(self, image_set, **opts):
         """
         Generates pedestrian tracks
@@ -1229,7 +1244,11 @@ class JAAD(object):
                         intent = [[0]] * len(boxes)
                     else:
                         intent = [[1]] * len(boxes)
-                    acts = [[int(pid_annots[pid]['attributes']['crossing'] > 0)]] * len(boxes)
+                    cross_attr = int(pid_annots[pid]['attributes']['crossing'] > 0)
+                    action_seq = pid_annots[pid]['behavior']['action'][:end_idx + 1]
+                    if len(action_seq) != len(boxes):
+                        action_seq = action_seq[:len(boxes)]
+                    acts = [[self._map_motion_class(action_seq[idx], cross_attr)] for idx in range(len(boxes))]
 
                 intent_seq.append(intent[::seq_stride])
                 activities.append(acts[::seq_stride])

@@ -6,6 +6,7 @@ import pickle
 import cv2
 import random as rn
 import copy
+from collections import Counter
 from tensorflow.keras.utils import Sequence
 from tensorflow.keras.applications import vgg16, resnet50, mobilenet
 from tensorflow.keras.preprocessing.image import load_img
@@ -48,28 +49,11 @@ class DataGenerator(Sequence):
 
     def on_epoch_end(self):
         self.indices = np.arange(len(self.data[0]))
-        self.pos_indices = []
-        self.neg_indices = []
-        for i in range(len(self.data[0])):
-            if self.labels[0][i][0][0] == 0.0:
-                self.neg_indices.append(i)
-            else:
-                self.pos_indices.append(i)
-        self.neg_indices = np.array(self.neg_indices)
-        self.pos_indices = np.array(self.pos_indices)
         if self.shuffle:
             np.random.shuffle(self.indices)
-            np.random.shuffle(self.pos_indices)
-            np.random.shuffle(self.neg_indices)
 
     def __getitem__(self, index):
-        if self.batch_size == 1 or self.batch_size == 612:
-            indices = self.indices[index*self.batch_size: (index+1)*self.batch_size]
-        else:
-            b_size = int(self.batch_size/2)
-            indices = np.concatenate((self.pos_indices[min(index*b_size, len(self.pos_indices)-b_size): min((index+1)*b_size, len(self.pos_indices))],
-                                      self.neg_indices[min(index*b_size, len(self.neg_indices)-b_size): min((index+1)*b_size, len(self.neg_indices))]), axis=-1)
-
+        indices = self.indices[index*self.batch_size: (index+1)*self.batch_size]
         X = self._generate_X(indices)
         y = self._generate_y(indices)
         return X, y
@@ -142,10 +126,10 @@ class DataGenerator(Sequence):
         return X
 
     def _generate_y(self, indices):
-        Y = np.empty((self.batch_size,))
+        Y = np.empty((self.batch_size,), dtype=np.int32)
         for i, index in enumerate(indices):
-                Y[i, ] = self.labels[0][index][0][0]
-        return [np.copy(Y) for i in range(int((self.opts['seq_len']-self.opts['obs_length'])/self.opts['step']))]
+            Y[i, ] = int(self.labels[0][index])
+        return np.copy(Y)
 
 
 
@@ -165,7 +149,7 @@ class DataGetter(object):
         data_type_sizes_dict = {}
         process = self.model_opts.get('process', True)
         dataset = self.model_opts['dataset']
-        data, intent_count, neg_count, pos_count = self.get_data_sequence()
+        data, class_count = self.get_data_sequence()
 
         data_type_sizes_dict['box'] = data['box'].shape[1:]
         if 'speed' in data.keys():
@@ -217,7 +201,7 @@ class DataGetter(object):
                 'ped_id': data['ped_id'],
                 'image': data['image'],
                 'data_params': {'data_types': data_types, 'data_sizes': data_sizes},
-                'count': {'neg_count': neg_count, 'pos_count': pos_count, 'intent_count':intent_count}}
+                'count': {'class_count': class_count}}
 
     def get_data_sequence(self):
         d = {'center': self.data_raw['center'].copy(),
@@ -226,9 +210,12 @@ class DataGetter(object):
              'crossing': self.data_raw['activities'].copy(),
              'image': self.data_raw['image'].copy()}
 
-        obs_length = self.model_opts['obs_length']
-        time_to_event = self.model_opts['time_to_event']
-        min_encoding_len = self.model_opts['min_encoding_len']
+        obs_seconds = self.model_opts.get('obs_seconds', 1)
+        fstride = self.model_opts.get('fstride', 1)
+        fps = max(1, int(self.model_opts.get('interval', 30) / max(1, fstride)))
+        obs_length = max(1, int(obs_seconds * fps))
+        self.model_opts['obs_length'] = obs_length
+        self.model_opts['seq_len'] = obs_length
 
         try:
             d['speed'] = self.data_raw['obd_speed'].copy()
@@ -251,15 +238,11 @@ class DataGetter(object):
             for seq in d[k]:
                 seq_len = len(seq)
 
-                if len(seq)>136 and self.data_type == 'train' and self.model_opts['data_augmentation']:
-                    seqs.extend([seq[i:i+16]+seq[len(seq)-4*time_to_event:] for i in range(0,len(seq)-2*obs_length-4*time_to_event,3)])
-                    lens.extend([min(seq_len, obs_length+4*time_to_event) for i in range(0,len(seq)-2*obs_length-4*time_to_event,3)])
-
-                if(int(len(seq)%(time_to_event+min_encoding_len))!=0):
-                    seq = [seq[0]]*(time_to_event+min_encoding_len-int(len(seq)%(time_to_event+min_encoding_len)))+seq
-
-                seqs.extend([seq[len(seq)-obs_length-4*time_to_event:]])
-                lens.extend([min(seq_len, obs_length+4*time_to_event)])
+                if seq_len < obs_length:
+                    seq = [seq[0]] * (obs_length - seq_len) + seq
+                    seq_len = len(seq)
+                seqs.extend([seq[-obs_length:]])
+                lens.extend([min(seq_len, obs_length)])
 
             if k == 'lens':
                 d[k] = lens
@@ -270,19 +253,12 @@ class DataGetter(object):
             d[k] = np.array(d[k])
 
         labels = []
-        crossing_count = 0
-        intending_count = 0
         for l in d['crossing']:
-            labels.append(l[0][0])
-            if(l[0][0] == 1):
-                crossing_count +=1
-            if(l[0][0] == 2):
-                intending_count +=1
-        d['labels'] = [[labels for i in range(int((self.model_opts['seq_len']-self.model_opts['obs_length'])/self.model_opts['step']))]]
+            labels.append(int(l[-1][0]))
+        d['labels'] = np.array(labels)
 
-        #del self.data_raw
-        notcrossing_count = len(d['crossing']) - crossing_count - intending_count
-        return d, intending_count, notcrossing_count, crossing_count
+        class_count = dict(Counter(labels))
+        return d, class_count
 
     def update_progress(self, progress):
         barLength = 20  # Modify this to change the length of the progress bar
