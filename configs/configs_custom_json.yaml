@@ -35,4 +35,4 @@ data_opts:
   data_split_type: default
   seq_type: crossing
   min_track_size: 16
-  path_to_json: C:/Users/burak/Downloads/Train.json
+  path_to_json: /home/bkaradurak/Projects/ObjectMotionDetection/01-Code/prevention-data-check/Train.json
