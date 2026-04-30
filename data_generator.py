@@ -48,6 +48,13 @@ class TrackJSONAdapter(object):
         return int(matches[-1])
 
     @staticmethod
+    def _sequence_id(frame_path):
+        normalized = str(frame_path).replace('\\', '/')
+        if '/frames/' in normalized:
+            return normalized.split('/frames/')[0]
+        return os.path.dirname(normalized)
+
+    @staticmethod
     def _xywh_to_xyxy(xywh, img_w, img_h):
         cx = float(xywh[0]) * img_w
         cy = float(xywh[1]) * img_h
@@ -75,11 +82,12 @@ class TrackJSONAdapter(object):
         for frame_path, frame_data in frame_dict.items():
             objects = frame_data.get('objs', [])
             frame_idx = self._frame_index(frame_path)
+            sequence_id = self._sequence_id(frame_path)
             for obj in objects:
                 track_id = obj.get('trackID', None)
                 if track_id is None:
                     continue
-                tid = str(track_id)
+                tid = "{}::{}".format(sequence_id, str(track_id))
                 tracks.setdefault(tid, [])
                 tracks[tid].append((frame_idx, frame_path, obj))
 
