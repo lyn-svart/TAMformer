@@ -261,7 +261,14 @@ class DataGenerator(Sequence):
     def _generate_y(self, indices):
         Y = np.empty((self.batch_size,), dtype=np.int32)
         for i, index in enumerate(indices):
-            Y[i, ] = int(self.labels[0][index])
+            label_value = self.labels[0][index]
+            if np.isscalar(label_value):
+                Y[i, ] = int(label_value)
+            else:
+                # Support sequence-shaped labels (e.g., [obs_len, 1]) by using
+                # the last available timestep class.
+                label_arr = np.asarray(label_value).reshape(-1)
+                Y[i, ] = int(label_arr[-1]) if label_arr.size else 0
         return np.copy(Y)
 
 
