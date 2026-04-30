@@ -62,6 +62,7 @@ def run(config_path, auxiliary_loss, test, resume):
     val_data = data_getter_val.get_data()
 
     tamformer = TAMformer(configs['model_opts'], auxiliary_loss).tamformer()
+    os.makedirs(configs['model_opts']['model_path'], exist_ok=True)
     model_name = configs['model_opts']['model_path']\
                  +'/tamformer_'+configs['model_opts']['dataset']+'_'\
                  +'_'.join(configs['model_opts']['obs_input_type'])+'_'\
