@@ -1,6 +1,6 @@
 from pie_data import PIE
 from jaad_data import JAAD
-from data_generator import DataGenerator, DataGetter
+from data_generator import DataGenerator, DataGetter, TrackJSONAdapter
 from tamformer import TAMformer
 import os
 import sys
@@ -35,14 +35,23 @@ def run(config_path, auxiliary_loss, test, resume):
     configs['model_opts']['fstride'] = configs['data_opts'].get('fstride', 1)
     configs['data_opts']['min_track_size'] = configs['model_opts']['obs_length']
 
-    if configs['model_opts']['dataset'] == 'jaad':
-        imdb = JAAD(data_path= configs['data_opts']['path_to_dataset'])
+    dataset_name = configs['model_opts']['dataset']
+    if dataset_name == 'custom_json':
+        json_path = configs['data_opts']['path_to_json']
+        adapter = TrackJSONAdapter(json_path)
+        data_raw_train = adapter.load()
+        # train-only mode: use the same split as val/test unless user provides separate files.
+        data_raw_test = copy.deepcopy(data_raw_train)
+        data_raw_val = copy.deepcopy(data_raw_train)
     else:
-        imdb = PIE(data_path= configs['data_opts']['path_to_dataset'])
+        if dataset_name == 'jaad':
+            imdb = JAAD(data_path=configs['data_opts']['path_to_dataset'])
+        else:
+            imdb = PIE(data_path=configs['data_opts']['path_to_dataset'])
 
-    data_raw_train = imdb.generate_data_trajectory_sequence('train', **configs['data_opts'])
-    data_raw_test = imdb.generate_data_trajectory_sequence('test', **configs['data_opts'])
-    data_raw_val = imdb.generate_data_trajectory_sequence('val', **configs['data_opts'])
+        data_raw_train = imdb.generate_data_trajectory_sequence('train', **configs['data_opts'])
+        data_raw_test = imdb.generate_data_trajectory_sequence('test', **configs['data_opts'])
+        data_raw_val = imdb.generate_data_trajectory_sequence('val', **configs['data_opts'])
 
     data_getter_train = DataGetter('train', data_raw_train, configs['model_opts'])
     data_getter_test = DataGetter('test', data_raw_test, configs['model_opts'])

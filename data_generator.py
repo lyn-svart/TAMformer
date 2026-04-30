@@ -6,11 +6,144 @@ import pickle
 import cv2
 import random as rn
 import copy
+import json
+import math
+import re
 from collections import Counter
 from tensorflow.keras.utils import Sequence
 from tensorflow.keras.applications import vgg16, resnet50, mobilenet
 from tensorflow.keras.preprocessing.image import load_img
 from pprint import pprint
+
+
+class TrackJSONAdapter(object):
+    """Convert frame-keyed JSON annotations into track-centered TAMformer data."""
+
+    MOTION_TO_CLASS = {
+        'approaching': 0,
+        'leaving': 1,
+        'crossing': 2,
+        'stopped': 3,
+        'standing': 4
+    }
+
+    def __init__(self, json_path):
+        self.json_path = json_path
+
+    @staticmethod
+    def _safe_float(value, default=0.0):
+        try:
+            value = float(value)
+            if math.isnan(value) or math.isinf(value):
+                return default
+            return value
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _frame_index(frame_path):
+        matches = re.findall(r'(\d+)', frame_path)
+        if not matches:
+            return -1
+        return int(matches[-1])
+
+    @staticmethod
+    def _xywh_to_xyxy(xywh, img_w, img_h):
+        cx = float(xywh[0]) * img_w
+        cy = float(xywh[1]) * img_h
+        bw = float(xywh[2]) * img_w
+        bh = float(xywh[3]) * img_h
+        x1 = max(0.0, cx - (bw / 2.0))
+        y1 = max(0.0, cy - (bh / 2.0))
+        x2 = min(float(img_w - 1), cx + (bw / 2.0))
+        y2 = min(float(img_h - 1), cy + (bh / 2.0))
+        return [x1, y1, x2, y2]
+
+    def _motion_to_class(self, motion):
+        if motion is None:
+            return 3
+        motion_key = str(motion).strip().lower()
+        if motion_key in self.MOTION_TO_CLASS:
+            return self.MOTION_TO_CLASS[motion_key]
+        return 4
+
+    def load(self):
+        with open(self.json_path, 'r', encoding='utf-8') as f:
+            frame_dict = json.load(f)
+
+        tracks = {}
+        for frame_path, frame_data in frame_dict.items():
+            objects = frame_data.get('objs', [])
+            frame_idx = self._frame_index(frame_path)
+            for obj in objects:
+                track_id = obj.get('trackID', None)
+                if track_id is None:
+                    continue
+                tid = str(track_id)
+                tracks.setdefault(tid, [])
+                tracks[tid].append((frame_idx, frame_path, obj))
+
+        image_seq = []
+        pids_seq = []
+        box_seq = []
+        center_seq = []
+        activities = []
+        obds_seq = []
+        image_dims = []
+
+        for tid, samples in tracks.items():
+            samples.sort(key=lambda x: x[0])
+            if len(samples) == 0:
+                continue
+
+            seq_images = []
+            seq_pids = []
+            seq_boxes = []
+            seq_centers = []
+            seq_acts = []
+            seq_speed = []
+
+            for _, frame_path, obj in samples:
+                img_w = int(obj.get('img_width', 1920))
+                img_h = int(obj.get('img_height', 1080))
+                xywh = obj.get('xywh', [0.5, 0.5, 0.0, 0.0])
+
+                bbox = self._xywh_to_xyxy(xywh, img_w, img_h)
+                cx = (bbox[0] + bbox[2]) / 2.0
+                cy = (bbox[1] + bbox[3]) / 2.0
+
+                class_id = self._motion_to_class(obj.get('motion', 'standing'))
+                vx = self._safe_float(obj.get('Vx', 0.0))
+                vz = self._safe_float(obj.get('Vz', 0.0))
+                speed = float(np.sqrt(vx * vx + vz * vz))
+
+                seq_images.append(frame_path)
+                seq_pids.append([tid])
+                seq_boxes.append(bbox)
+                seq_centers.append([cx, cy])
+                seq_acts.append([class_id])
+                seq_speed.append([speed])
+
+            image_seq.append(seq_images)
+            pids_seq.append(seq_pids)
+            box_seq.append(seq_boxes)
+            center_seq.append(seq_centers)
+            activities.append(seq_acts)
+            obds_seq.append(seq_speed)
+            image_dims.append((img_w, img_h))
+
+        print("Loaded {} track-centered sequences from {}".format(len(image_seq), self.json_path))
+        class_values = [seq[-1][0] for seq in activities if len(seq) > 0]
+        class_count = dict(Counter(class_values))
+        print("Class distribution (motion classes):", class_count)
+
+        return {'image': image_seq,
+                'pid': pids_seq,
+                'bbox': box_seq,
+                'center': center_seq,
+                'obd_speed': obds_seq,
+                'activities': activities,
+                'image_dimension': image_dims}
 
 class DataGenerator(Sequence):
 

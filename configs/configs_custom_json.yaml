@@ -1,0 +1,38 @@
+model_opts:
+  model: Static
+  backbone: vgg16
+  obs_input_type: [box, speed]
+  enlarge_ratio: 1.5
+  obs_length: 16
+  time_to_event: 30
+  min_encoding_len: 16
+  balance_data: False
+  apply_class_weights: True
+  dataset: custom_json
+  normalize_boxes: True
+  data_augmentation: False
+  generator: True
+  obs_seconds: 1
+  batch_size: 64
+  val_batch_size: 64
+  dropout: 0.1
+  interval: 30
+  classifier_activation: softmax
+  classifier_loss: sparse_categorical_crossentropy
+  epochs: 20
+  optimizer: sgd
+  lr: 0.00001
+  model_path: ./models
+  step: 3
+  seq_len: 16
+  feat_size: [4, 1]
+  num_classes: 5
+  class_weights: [1.0, 1.0, 1.0, 1.0, 1.0]
+data_opts:
+  fstride: 1
+  sample_type: all
+  subset: default
+  data_split_type: default
+  seq_type: crossing
+  min_track_size: 16
+  path_to_json: C:/Users/burak/Downloads/Train.json
