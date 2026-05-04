@@ -18,8 +18,11 @@ model_opts:
   # - visual_disk_cache: true enables writing .pkl features
   # - visual_disk_cache_train_only: true limits caching to train split only
   #   (val/test stay live to reduce disk growth).
+  # - visual_cache_pooled: true stores pooled vectors instead of full feature maps
+  #   (dramatically less disk and faster cache reads).
   visual_disk_cache: true
   visual_disk_cache_train_only: true
+  visual_cache_pooled: true
   obs_seconds: 1
   batch_size: 64
   val_batch_size: 64

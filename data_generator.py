@@ -272,6 +272,10 @@ class DataGenerator(Sequence):
                 img_features = pickle.load(fid)
             except:
                 img_features = pickle.load(fid, encoding='bytes')
+        img_features = np.asarray(img_features)
+        # If cache already stores pooled vectors, return directly.
+        if img_features.ndim <= 1:
+            return np.asarray(img_features, dtype=np.float32)
         if self.process:
             if self.global_pooling == 'max':
                 img_features = np.squeeze(img_features)
@@ -286,19 +290,22 @@ class DataGenerator(Sequence):
         return img_features
 
     def _pool_cnn_output(self, img_features):
+        arr = np.asarray(img_features)
+        if arr.ndim <= 1:
+            return np.asarray(arr, dtype=np.float32)
         if not self.process:
-            return np.asarray(img_features, dtype=np.float32).ravel()
+            return np.asarray(arr, dtype=np.float32).ravel()
         if self.global_pooling == 'max':
-            out = np.squeeze(img_features)
+            out = np.squeeze(arr)
             out = np.amax(out, axis=0)
             out = np.amax(out, axis=0)
             return np.asarray(out, dtype=np.float32)
         if self.global_pooling == 'avg':
-            out = np.squeeze(img_features)
+            out = np.squeeze(arr)
             out = np.average(out, axis=0)
             out = np.average(out, axis=0)
             return np.asarray(out, dtype=np.float32)
-        return np.asarray(img_features, dtype=np.float32).ravel()
+        return np.asarray(arr, dtype=np.float32).ravel()
 
     def _ensure_live_convnet(self):
         if getattr(self, '_live_convnet', None) is not None:
@@ -827,6 +834,7 @@ class DataGetter(object):
             assert (self._backbone in ['vgg16', 'resnet50', 'mobilenet']), "{} is not supported".format(self._backbone)
 
         skip_convnet_init = self._generator and not disk_cache
+        cache_pooled_visual = bool(self.model_opts.get('visual_cache_pooled', False))
         if skip_convnet_init:
             print("visual_disk_cache=False with generator=True: no disk cache and no upfront CNN pass.")
             print("Visual features will be computed on-the-fly each batch (slower epochs, zero feature-cache storage).")
@@ -926,11 +934,14 @@ class DataGetter(object):
                     if process:
                         expanded_img = np.expand_dims(img_features, axis=0)
                         img_features = convnet.predict(expanded_img, verbose=0)
+                    cache_obj = img_features
+                    if process and cache_pooled_visual:
+                        cache_obj = self._pool_cnn_output(img_features)
                     # Save the file
                     if not os.path.exists(img_save_folder):
                         os.makedirs(img_save_folder, exist_ok=True)
                     with open(img_save_path, 'wb') as fid:
-                        pickle.dump(img_features, fid, pickle.HIGHEST_PROTOCOL)
+                        pickle.dump(cache_obj, fid, pickle.HIGHEST_PROTOCOL)
 
                 # if using the generator save the cached features path and size of the features
                 if process and not self._generator:
