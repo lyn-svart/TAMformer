@@ -2,6 +2,7 @@ import argparse
 import os
 import random
 import re
+from collections import defaultdict
 
 import cv2
 import matplotlib.pyplot as plt
@@ -16,7 +17,18 @@ def _normalize(path_str):
     return str(path_str).replace("\\", os.sep).replace("/", os.sep)
 
 
-def _resolve_frame_path(frame_path, dataset_root=None):
+def _build_basename_index(search_roots):
+    index = defaultdict(list)
+    for root in search_roots:
+        if not root or not os.path.isdir(root):
+            continue
+        for dirpath, _, filenames in os.walk(root):
+            for fn in filenames:
+                index[fn].append(os.path.join(dirpath, fn))
+    return index
+
+
+def _resolve_frame_path(frame_path, dataset_root=None, basename_index=None):
     normalized = _normalize(frame_path)
     candidates = [normalized]
     if dataset_root:
@@ -27,6 +39,11 @@ def _resolve_frame_path(frame_path, dataset_root=None):
     for c in candidates:
         if os.path.isfile(c):
             return c
+    if basename_index is not None:
+        base = os.path.basename(normalized)
+        if base in basename_index:
+            # Prefer the shortest path to avoid nested stale copies.
+            return sorted(basename_index[base], key=len)[0]
     return None
 
 
@@ -68,6 +85,7 @@ def main():
     parser = argparse.ArgumentParser(description="Visual sanity-check for custom_json TAMformer inputs.")
     parser.add_argument("--json_path", type=str, required=True, help="Path to frame-keyed JSON.")
     parser.add_argument("--dataset_root", type=str, default=None, help="Optional root folder to resolve frame paths.")
+    parser.add_argument("--frames_root", type=str, default=None, help="Optional explicit directory that contains frame images.")
     parser.add_argument("--track_id", type=str, default=None, help="Track ID to inspect (default: random).")
     parser.add_argument("--num_frames", type=int, default=6, help="How many timesteps to render.")
     parser.add_argument("--save_path", type=str, default="input_sanity.png", help="Output image path.")
@@ -88,17 +106,23 @@ def main():
 
     k = min(max(1, args.num_frames), len(entries))
     sampled = entries[-k:]
+    json_dir = os.path.dirname(os.path.abspath(args.json_path))
+    search_roots = [args.frames_root, args.dataset_root, json_dir]
+    basename_index = _build_basename_index(search_roots)
 
     fig, axes = plt.subplots(1, k, figsize=(4 * k, 4))
     if k == 1:
         axes = [axes]
 
     rendered = 0
+    unresolved_examples = []
     for ax, (frame_path, obj) in zip(axes, sampled):
-        resolved = _resolve_frame_path(frame_path, args.dataset_root)
+        resolved = _resolve_frame_path(frame_path, args.dataset_root, basename_index=basename_index)
         if not resolved:
             ax.set_title("missing frame")
             ax.axis("off")
+            if len(unresolved_examples) < 3:
+                unresolved_examples.append(str(frame_path))
             continue
 
         img = cv2.imread(resolved)
@@ -124,6 +148,11 @@ def main():
     fig.tight_layout()
     fig.savefig(args.save_path, dpi=140)
     print(f"Saved visualization: {args.save_path}")
+    if unresolved_examples:
+        print("Could not resolve some frame paths. Example JSON paths:")
+        for p in unresolved_examples:
+            print(" -", p)
+        print("Try --frames_root <actual frames directory>.")
 
 
 if __name__ == "__main__":
