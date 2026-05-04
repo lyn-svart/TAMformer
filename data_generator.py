@@ -668,6 +668,9 @@ class DataGetter(object):
         if 'local_context' in feature_type or 'surround' in feature_type:
             save_folder_name = '_'.join([save_folder_name, str(eratio)])
         disk_cache = self.model_opts.get('visual_disk_cache', True)
+        cache_train_only = self.model_opts.get('visual_disk_cache_train_only', False)
+        if cache_train_only and self.data_type != 'train':
+            disk_cache = False
         data_gen_params['disk_cache'] = disk_cache
         if disk_cache:
             data_gen_params['save_path'], _ = self.get_path(
