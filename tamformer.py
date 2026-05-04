@@ -43,7 +43,8 @@ class TransformerBlock(layers.Layer):
 
     def call(self, inputs, training=None, attention_mask=None):
         if self.cross_attention:
-            if (attention_mask is not None) and (not training):
+            # Only hard-round masks at inference time; keep them differentiable in train graph.
+            if (attention_mask is not None) and (training is False):
                 attention_mask = keras.ops.round(attention_mask)
             attn_output = self.att(inputs[0], inputs[1], attention_mask=attention_mask)
             attn_output = self.dropout1(attn_output, training=training)
@@ -52,7 +53,8 @@ class TransformerBlock(layers.Layer):
             else:
                 out1 = inputs[0] + attn_output
         else:
-            if (attention_mask is not None) and (not training):
+            # Only hard-round masks at inference time; keep them differentiable in train graph.
+            if (attention_mask is not None) and (training is False):
                 attention_mask = keras.ops.round(attention_mask)
             attn_output = self.att(inputs, inputs, attention_mask=attention_mask)
             attn_output = self.dropout1(attn_output, training=training)
