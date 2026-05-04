@@ -703,6 +703,24 @@ class DataGetter(object):
             return int(shp[-1])
         return int(np.prod(shp))
 
+    def _pool_cnn_output(self, img_features):
+        arr = np.asarray(img_features)
+        if arr.ndim <= 1:
+            return np.asarray(arr, dtype=np.float32)
+        if not self.model_opts.get('process', True):
+            return np.asarray(arr, dtype=np.float32).ravel()
+        if self._global_pooling == 'max':
+            out = np.squeeze(arr)
+            out = np.amax(out, axis=0)
+            out = np.amax(out, axis=0)
+            return np.asarray(out, dtype=np.float32)
+        if self._global_pooling == 'avg':
+            out = np.squeeze(arr)
+            out = np.average(out, axis=0)
+            out = np.average(out, axis=0)
+            return np.asarray(out, dtype=np.float32)
+        return np.asarray(arr, dtype=np.float32).ravel()
+
 
     def jitter_bbox(self, img_path, bbox, mode, ratio):
         assert (mode in ['same', 'enlarge', 'move', 'random_enlarge', 'random_move']), \
