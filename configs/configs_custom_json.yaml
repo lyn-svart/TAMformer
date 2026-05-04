@@ -26,8 +26,8 @@ model_opts:
   step: 3
   seq_len: 16
   feat_size: [4, 1]
-  num_classes: 5
-  class_weights: [1.0, 1.0, 1.0, 1.0, 1.0]
+  num_classes: 21
+  class_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
 data_opts:
   fstride: 1
   sample_type: all

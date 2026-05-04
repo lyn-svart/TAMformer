@@ -20,13 +20,27 @@ class TrackJSONAdapter(object):
     """Convert frame-keyed JSON annotations into track-centered TAMformer data."""
 
     MOTION_TO_CLASS = {
-        'approaching': 0,
-        'leaving': 1,
-        'crossing': 2,
+        'opposite': 0,
+        'crossing-tocenter': 1,
+        'crossing-outward': 2,
         'stopped': 3,
-        'standing': 5,
-        'following': 4,
-        'walking': 6
+        'approaching': 4,
+        'ra-merge': 5,
+        'ra-exit': 6,
+        'ra': 7,
+        'leaving': 8,
+        'og-exit': 9,
+        'passed': 10,
+        'passing': 11,
+        'og-r2l': 12,
+        'og-l2r': 13,
+        'tc-l2r': 14,
+        'tc-r2l': 15,
+        'tc-merge': 16,
+        'parked': 17,
+        'following': 18,
+        'ra-yield': 19,
+        'intent to cross': 20,
     }
 
     def __init__(self, json_path, chunk_dt=10):
@@ -77,7 +91,7 @@ class TrackJSONAdapter(object):
         motion_key = str(motion).strip().lower()
         if motion_key in self.MOTION_TO_CLASS:
             return self.MOTION_TO_CLASS[motion_key]
-        return 4
+        return 3
 
     def load(self):
         with open(self.json_path, 'r', encoding='utf-8') as f:
@@ -129,7 +143,7 @@ class TrackJSONAdapter(object):
                 cx = (bbox[0] + bbox[2]) / 2.0
                 cy = (bbox[1] + bbox[3]) / 2.0
 
-                class_id = self._motion_to_class(obj.get('motion', 'standing'))
+                class_id = self._motion_to_class(obj.get('motion', 'stopped'))
                 vx = self._safe_float(obj.get('Vx', 0.0))
                 vz = self._safe_float(obj.get('Vz', 0.0))
                 speed = float(np.sqrt(vx * vx + vz * vz))
