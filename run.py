@@ -14,7 +14,35 @@ import random as rn
 from argparse import ArgumentParser
 import copy
 from tensorflow.compat.v1.keras import backend as K
-session_conf = tf.compat.v1.ConfigProto(intra_op_parallelism_threads=10, inter_op_parallelism_threads=10)
+
+
+def _configure_gpu():
+    """Prefer GPU when present; avoid grabbing all VRAM at once (TF 2.x + compat.v1 Session)."""
+    gpus = tf.config.list_physical_devices("GPU")
+    if not gpus:
+        print(
+            "No GPU visible to TensorFlow. On Windows, pip `tensorflow` is GPU-capable only up to "
+            "2.10.x and needs a matching NVIDIA driver plus CUDA 11.2 / cuDNN 8.1 on the PATH "
+            "(or use WSL2/Linux with a current stack). Continuing on CPU."
+        )
+        return
+    try:
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+    except RuntimeError as e:
+        print("GPU memory growth setting skipped:", e)
+    print("TensorFlow sees GPU(s):", [g.name for g in gpus])
+
+
+_configure_gpu()
+
+gpu_options = tf.compat.v1.GPUOptions(allow_growth=True)
+session_conf = tf.compat.v1.ConfigProto(
+    gpu_options=gpu_options,
+    allow_soft_placement=True,
+    intra_op_parallelism_threads=10,
+    inter_op_parallelism_threads=10,
+)
 sess = tf.compat.v1.Session(graph=tf.compat.v1.get_default_graph(), config=session_conf)
 K.set_session(sess)
 
