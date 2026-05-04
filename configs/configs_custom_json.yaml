@@ -1,7 +1,7 @@
 model_opts:
   model: Static
   backbone: vgg16
-  obs_input_type: [box, speed]
+  obs_input_type: [box, speed, local_context]
   enlarge_ratio: 1.5
   obs_length: 16
   time_to_event: 30
@@ -25,7 +25,7 @@ model_opts:
   model_path: ./models
   step: 3
   seq_len: 16
-  feat_size: [4, 1]
+  feat_size: [4, 1, 512]
   num_classes: 21
   class_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
 data_opts:
@@ -39,5 +39,6 @@ data_opts:
   path_to_json_train: /home/bkaradurak/Projects/ObjectMotionDetection/01-Code/prevention-data-check/splits/train.json
   path_to_json_val: /home/bkaradurak/Projects/ObjectMotionDetection/01-Code/prevention-data-check/splits/val.json
   path_to_json_test: /home/bkaradurak/Projects/ObjectMotionDetection/01-Code/prevention-data-check/splits/test.json
+  path_to_frames_root: /home/bkaradurak/Projects/ObjectMotionDetection/02-Source/PreventionData
   # Legacy single-file mode (train=val=test) if split paths are not provided:
   path_to_json: /home/bkaradurak/Projects/ObjectMotionDetection/01-Code/prevention-data-check/Train.json

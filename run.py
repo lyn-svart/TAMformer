@@ -62,6 +62,7 @@ def run(config_path, auxiliary_loss, test, resume):
     dataset_name = configs['model_opts']['dataset']
     if dataset_name == 'custom_json':
         chunk_dt = configs['data_opts'].get('chunk_dt', 10)
+        frames_root = configs['data_opts'].get('path_to_frames_root')
         if chunk_dt is not None:
             chunk_dt = int(chunk_dt)
         train_json = configs['data_opts'].get('path_to_json_train')
@@ -69,12 +70,12 @@ def run(config_path, auxiliary_loss, test, resume):
         test_json = configs['data_opts'].get('path_to_json_test')
         if train_json and val_json and test_json:
             print("Using explicit custom_json splits (train/val/test).")
-            data_raw_train = TrackJSONAdapter(train_json, chunk_dt=chunk_dt).load()
-            data_raw_val = TrackJSONAdapter(val_json, chunk_dt=chunk_dt).load()
-            data_raw_test = TrackJSONAdapter(test_json, chunk_dt=chunk_dt).load()
+            data_raw_train = TrackJSONAdapter(train_json, chunk_dt=chunk_dt, frames_root=frames_root).load()
+            data_raw_val = TrackJSONAdapter(val_json, chunk_dt=chunk_dt, frames_root=frames_root).load()
+            data_raw_test = TrackJSONAdapter(test_json, chunk_dt=chunk_dt, frames_root=frames_root).load()
         else:
             json_path = configs['data_opts']['path_to_json']
-            adapter = TrackJSONAdapter(json_path, chunk_dt=chunk_dt)
+            adapter = TrackJSONAdapter(json_path, chunk_dt=chunk_dt, frames_root=frames_root)
             data_raw_train = adapter.load()
             # Backward-compatible single-file mode (not suitable for final evaluation).
             data_raw_test = copy.deepcopy(data_raw_train)

@@ -43,11 +43,12 @@ class TrackJSONAdapter(object):
         'intent to cross': 20,
     }
 
-    def __init__(self, json_path, chunk_dt=10):
+    def __init__(self, json_path, chunk_dt=10, frames_root=None):
         """chunk_dt: if set, emit sliding windows of length chunk_dt+1 (frames i..i+chunk_dt).
         If None, emit one sample per full track (previous behavior)."""
         self.json_path = json_path
         self.chunk_dt = chunk_dt
+        self.frames_root = frames_root
 
     @staticmethod
     def _safe_float(value, default=0.0):
@@ -72,6 +73,30 @@ class TrackJSONAdapter(object):
         if '/frames/' in normalized:
             return normalized.split('/frames/')[0]
         return os.path.dirname(normalized)
+
+    @staticmethod
+    def _record_drive_suffix(frame_path):
+        normalized = str(frame_path).replace('\\', '/')
+        match = re.search(r'(RECORD[^/]+/DRIVE[^/]+/frames/.+)$', normalized)
+        if match:
+            return match.group(1)
+        return None
+
+    def _resolve_frame_path(self, frame_path):
+        normalized = str(frame_path).replace('\\', '/')
+        if os.path.isfile(normalized):
+            return normalized
+        if not self.frames_root:
+            return normalized
+        root = str(self.frames_root)
+        candidates = [os.path.join(root, normalized)]
+        rd_suffix = self._record_drive_suffix(normalized)
+        if rd_suffix:
+            candidates.append(os.path.join(root, rd_suffix))
+        for c in candidates:
+            if os.path.isfile(c):
+                return c
+        return normalized
 
     @staticmethod
     def _xywh_to_xyxy(xywh, img_w, img_h):
@@ -148,7 +173,7 @@ class TrackJSONAdapter(object):
                 vz = self._safe_float(obj.get('Vz', 0.0))
                 speed = float(np.sqrt(vx * vx + vz * vz))
 
-                seq_images.append(frame_path)
+                seq_images.append(self._resolve_frame_path(frame_path))
                 seq_pids.append([tid])
                 seq_boxes.append(bbox)
                 seq_centers.append([cx, cy])
