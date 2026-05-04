@@ -90,14 +90,30 @@ def run(config_path, auxiliary_loss, test, resume):
 
     tamformer = TAMformer(configs['model_opts'], auxiliary_loss).tamformer()
     os.makedirs(configs['model_opts']['model_path'], exist_ok=True)
-    model_name = configs['model_opts']['model_path']\
-                 +'/tamformer_'+configs['model_opts']['dataset']+'_'\
-                 +'_'.join(configs['model_opts']['obs_input_type'])+'_'\
-                 +str(configs['model_opts']['lr'])+'.h5'
+    weights_stem = (
+        configs['model_opts']['model_path']
+        + '/tamformer_'
+        + configs['model_opts']['dataset']
+        + '_'
+        + '_'.join(configs['model_opts']['obs_input_type'])
+        + '_'
+        + str(configs['model_opts']['lr'])
+    )
+    # Keras 3: save_weights_only requires filepath to end with `.weights.h5`
+    model_name = weights_stem + '.weights.h5'
+    legacy_weights_h5 = weights_stem + '.h5'
+
+    def _weights_file_to_load():
+        if os.path.isfile(model_name):
+            return model_name
+        if os.path.isfile(legacy_weights_h5):
+            return legacy_weights_h5
+        return model_name
 
     if test or resume:
-        print("Lodaing "+model_name+" ...")
-        tamformer.load_weights(model_name, by_name=False, skip_mismatch=False)
+        load_path = _weights_file_to_load()
+        print("Lodaing " + load_path + " ...")
+        tamformer.load_weights(load_path, by_name=False, skip_mismatch=False)
     if not test:
         class_w = class_weights(configs['model_opts']['apply_class_weights'],
                                      data_train['count'],
