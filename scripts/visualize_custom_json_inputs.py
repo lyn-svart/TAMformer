@@ -45,6 +45,14 @@ def _extract_record_drive_suffix(normalized_path):
     return None
 
 
+def _extract_record_drive(path_str):
+    unix = str(path_str).replace("\\", "/")
+    m = re.search(r"(RECORD[^/]+)/(DRIVE[^/]+)", unix)
+    if not m:
+        return "UNKNOWN_RECORD", "UNKNOWN_DRIVE"
+    return m.group(1), m.group(2)
+
+
 def _resolve_frame_path(frame_path, dataset_root=None, basename_index=None, rel_index=None):
     normalized = _normalize(frame_path)
     candidates = [normalized]
@@ -143,6 +151,7 @@ def main():
     rendered = 0
     unresolved_examples = []
     for ax, (frame_path, obj) in zip(axes, sampled):
+        record_name, drive_name = _extract_record_drive(frame_path)
         resolved = _resolve_frame_path(
             frame_path,
             args.dataset_root,
@@ -167,12 +176,13 @@ def main():
         cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
         speed = float(obj.get("Vx", 0.0))
         motion = str(obj.get("motion", "unknown"))
-        label = f"id={tid} motion={motion} speed={speed:.2f}"
+        label = f"id={tid} {record_name}/{drive_name} motion={motion} speed={speed:.2f}"
         cv2.putText(img, label, (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 0), 2, cv2.LINE_AA)
 
         ax.imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
         ax.set_title(os.path.basename(_normalize(frame_path)))
         ax.axis("off")
+        print(f"Frame source: {record_name}/{drive_name} | json={frame_path} | resolved={resolved}")
         rendered += 1
 
     fig.suptitle(f"Track {tid} | rendered {rendered}/{k} frames", fontsize=12)
