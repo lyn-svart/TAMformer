@@ -205,7 +205,9 @@ class DataGenerator(Sequence):
                  shuffle=True,
                  to_fit=True,
                  stack_feats=False,
-                 opts=None):
+                 opts=None,
+                 **kwargs):
+        super().__init__(**kwargs)
 
         self.data = data
         self.labels = labels
@@ -236,7 +238,8 @@ class DataGenerator(Sequence):
         indices = self.indices[index*self.batch_size: (index+1)*self.batch_size]
         X = self._generate_X(indices)
         y = self._generate_y(indices)
-        return X, y
+        # Keras 3 data adapter expects tuple/dict tree (not raw Python list).
+        return tuple(X), y
 
     def _get_img_features(self, cached_path):
         with open(cached_path, 'rb') as fid:
