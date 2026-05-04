@@ -947,7 +947,15 @@ class DataGetter(object):
                 else:
                     img_seq.append(img_features)
             sequences.append(img_seq)
-        sequences = np.array(sequences)
+        # Live specs are (path, bbox, ...) tuples; np.array() would try to stack them into a broken ndarray.
+        if skip_convnet_init:
+            nseq = len(sequences)
+            seq_obj = np.empty((nseq,), dtype=object)
+            for _si in range(nseq):
+                seq_obj[_si] = sequences[_si]
+            sequences = seq_obj
+        else:
+            sequences = np.array(sequences)
         # compute size of the features after the processing
         if self._generator:
             if skip_convnet_init:
