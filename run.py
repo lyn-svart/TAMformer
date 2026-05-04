@@ -1,7 +1,3 @@
-from pie_data import PIE
-from jaad_data import JAAD
-from data_generator import DataGenerator, DataGetter, TrackJSONAdapter
-from tamformer import TAMformer
 import os
 import sys
 import yaml
@@ -13,11 +9,16 @@ import tensorflow as tf
 import random as rn
 from argparse import ArgumentParser
 import copy
-from tensorflow.compat.v1.keras import backend as K
+
+try:
+    tf.config.threading.set_intra_op_parallelism_threads(10)
+    tf.config.threading.set_inter_op_parallelism_threads(10)
+except RuntimeError:
+    pass
 
 
 def _configure_gpu():
-    """Prefer GPU when present; avoid grabbing all VRAM at once (TF 2.x + compat.v1 Session)."""
+    """Prefer GPU when present; avoid grabbing all VRAM at once (memory growth)."""
     gpus = tf.config.list_physical_devices("GPU")
     if not gpus:
         print(
@@ -36,15 +37,10 @@ def _configure_gpu():
 
 _configure_gpu()
 
-gpu_options = tf.compat.v1.GPUOptions(allow_growth=True)
-session_conf = tf.compat.v1.ConfigProto(
-    gpu_options=gpu_options,
-    allow_soft_placement=True,
-    intra_op_parallelism_threads=10,
-    inter_op_parallelism_threads=10,
-)
-sess = tf.compat.v1.Session(graph=tf.compat.v1.get_default_graph(), config=session_conf)
-K.set_session(sess)
+from pie_data import PIE
+from jaad_data import JAAD
+from data_generator import DataGenerator, DataGetter, TrackJSONAdapter
+from tamformer import TAMformer
 
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
 from tensorflow.keras.optimizers import Adam, SGD, RMSprop
@@ -180,10 +176,10 @@ def weighted_sparse_categorical_crossentropy(weights=None, out_weight=1.0):
         y_true_int = tf.cast(y_true, tf.int32)
         ce = tf.keras.losses.sparse_categorical_crossentropy(y_true_int, y_pred)
         if weights is None:
-            return K.mean(ce) * out_weight
+            return tf.reduce_mean(ce) * out_weight
         class_weights_tensor = tf.constant(weights, dtype=y_pred.dtype)
         sample_weights = tf.gather(class_weights_tensor, y_true_int)
-        return K.mean(ce * sample_weights) * out_weight
+        return tf.reduce_mean(ce * sample_weights) * out_weight
     return loss_func
 
 

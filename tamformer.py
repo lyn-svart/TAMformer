@@ -5,7 +5,6 @@ import numpy as np
 import tensorflow as tf
 import random as rn
 import copy
-from tensorflow.compat.v1.keras import backend as K
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Dense, Dropout, Lambda, Concatenate, BatchNormalization, Softmax, Flatten, Add, Activation
 from tensorflow.keras import layers, activations
@@ -142,8 +141,8 @@ class TAMformer(object):
 
         if self.auxiliary_loss:
             to_add_losses = []
-            mse = K.square(Lambda(lambda s: s[:,0])(cross_transformer_block) - Lambda(lambda s: s[:,0])(query_transformer))
-            to_add_losses.append(K.mean(mse))
+            mse = tf.square(Lambda(lambda s: s[:,0])(cross_transformer_block) - Lambda(lambda s: s[:,0])(query_transformer))
+            to_add_losses.append(tf.reduce_mean(mse))
             model.add_loss(to_add_losses)
 
         return model
