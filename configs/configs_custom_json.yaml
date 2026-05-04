@@ -1,6 +1,6 @@
 model_opts:
   model: Static
-  backbone: vgg16
+  backbone: mobilenet #vgg16
   obs_input_type: [box, speed, local_context]
   enlarge_ratio: 1.5
   obs_length: 16
@@ -12,6 +12,8 @@ model_opts:
   normalize_boxes: True
   data_augmentation: False
   generator: True
+  # Automatically set feat_size from obs_input_type/backbone at runtime.
+  auto_feat_size: true
   # Visual cache policy:
   # - visual_disk_cache: true enables writing .pkl features
   # - visual_disk_cache_train_only: true limits caching to train split only
@@ -31,6 +33,7 @@ model_opts:
   model_path: ./models
   step: 3
   seq_len: 16
+  # Ignored when auto_feat_size=true. Kept for readability/defaults.
   feat_size: [4, 1, 512]
   num_classes: 21
   class_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]

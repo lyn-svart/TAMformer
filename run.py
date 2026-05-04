@@ -47,6 +47,37 @@ from tensorflow.keras.optimizers import Adam, SGD, RMSprop
 from tensorflow import keras
 
 
+def _auto_configure_feat_size(model_opts):
+    """Auto-derive feat_size from obs_input_type and backbone when enabled."""
+    if not model_opts.get('auto_feat_size', False):
+        return
+
+    obs_input_types = model_opts.get('obs_input_type', [])
+    backbone = model_opts.get('backbone', 'vgg16')
+    feat_size = []
+
+    for d_type in obs_input_types:
+        if d_type == 'box':
+            feat_size.append(4)
+        elif d_type == 'speed':
+            feat_size.append(1)
+        elif ('local' in d_type) or ('context' in d_type) or ('surround' in d_type):
+            feat_size.append(DataGetter.spatial_backbone_vector_dim(backbone, 'max'))
+        else:
+            # Keep compatibility for unknown/custom modalities.
+            configured = model_opts.get('feat_size', [])
+            idx = len(feat_size)
+            if isinstance(configured, list) and idx < len(configured):
+                feat_size.append(configured[idx])
+            else:
+                raise ValueError(
+                    "auto_feat_size cannot infer dim for obs_input_type '{}'".format(d_type)
+                )
+
+    model_opts['feat_size'] = feat_size
+    print("Auto feat_size:", feat_size, "(backbone={})".format(backbone))
+
+
 def run(config_path, auxiliary_loss, test, resume):
     with open(config_path, 'r') as f:
         configs = yaml.safe_load(f)
@@ -57,6 +88,7 @@ def run(config_path, auxiliary_loss, test, resume):
     configs['model_opts']['obs_length'] = max(1, int(obs_seconds * fps))
     configs['model_opts']['seq_len'] = configs['model_opts']['obs_length']
     configs['model_opts']['fstride'] = configs['data_opts'].get('fstride', 1)
+    _auto_configure_feat_size(configs['model_opts'])
     configs['data_opts']['min_track_size'] = configs['model_opts']['obs_length']
 
     dataset_name = configs['model_opts']['dataset']
