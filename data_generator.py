@@ -724,16 +724,26 @@ class DataGetter(object):
             img_seq = []
             for imp, b, p in zip(seq, bbox_seq[i], pid):
                 flip_image = False
-                set_id = imp.split('/')[-3]
-                vid_id = imp.split('/')[-2]
-                img_name = imp.split('/')[-1].split('.')[0]
+                imp_norm = str(imp).replace('\\', '/')
+                # Prefer RECORD/DRIVE ids when present in path; fallback to trailing folders.
+                rd_match = re.search(r'(RECORD[^/]+)/?(DRIVE[^/]+)?/frames/', imp_norm)
+                if rd_match:
+                    set_id = rd_match.group(1)
+                    vid_id = rd_match.group(2) if rd_match.group(2) else 'unknown_drive'
+                else:
+                    parts = imp_norm.split('/')
+                    set_id = parts[-3] if len(parts) >= 3 else 'unknown_set'
+                    vid_id = parts[-2] if len(parts) >= 2 else 'unknown_vid'
+                img_name = os.path.splitext(os.path.basename(imp_norm))[0]
                 img_save_folder = os.path.join(save_path, set_id, vid_id)
 
                 # Modify the path depending on crop mode
                 if crop_type == 'none':
                     img_save_path = os.path.join(img_save_folder, img_name + '.pkl')
                 else:
-                    img_save_path = os.path.join(img_save_folder, img_name + '_' + p[0] + '.pkl')
+                    pid_token = str(p[0]) if isinstance(p, (list, tuple, np.ndarray)) else str(p)
+                    pid_token = re.sub(r'[^A-Za-z0-9_.-]+', '_', pid_token)
+                    img_save_path = os.path.join(img_save_folder, img_name + '_' + pid_token + '.pkl')
 
                 # Check whether the file exists
                 if os.path.exists(img_save_path) and not regen_data:
@@ -783,7 +793,7 @@ class DataGetter(object):
                         img_features = convnet.predict(expanded_img, verbose=0)
                     # Save the file
                     if not os.path.exists(img_save_folder):
-                        os.makedirs(img_save_folder)
+                        os.makedirs(img_save_folder, exist_ok=True)
                     with open(img_save_path, 'wb') as fid:
                         pickle.dump(img_features, fid, pickle.HIGHEST_PROTOCOL)
 
