@@ -24,7 +24,9 @@ class TrackJSONAdapter(object):
         'leaving': 1,
         'crossing': 2,
         'stopped': 3,
-        'standing': 4
+        'standing': 5,
+        'following': 4,
+        'walking': 6
     }
 
     def __init__(self, json_path, chunk_dt=10):
@@ -86,8 +88,11 @@ class TrackJSONAdapter(object):
             objects = frame_data.get('objs', [])
             frame_idx = self._frame_index(frame_path)
             sequence_id = self._sequence_id(frame_path)
+            
             for obj in objects:
                 track_id = obj.get('trackID', None)
+                if obj.get('type') == 'Human':
+                    continue
                 if track_id is None:
                     continue
                 tid = "{}::{}".format(sequence_id, str(track_id))
@@ -146,7 +151,7 @@ class TrackJSONAdapter(object):
                 obds_seq.append(seq_speed)
                 image_dims.append(seq_dims[-1])
             else:
-                window = int(self.chunk_dt) + 1
+                window = int(self.chunk_dt)
                 n = len(seq_images)
                 if n < window:
                     continue
