@@ -12,6 +12,8 @@ model_opts:
   normalize_boxes: True
   data_augmentation: False
   generator: True
+  # When False with generator=True: no .pkl feature cache; CNN runs each batch (slow, no extra disk).
+  visual_disk_cache: false
   obs_seconds: 1
   batch_size: 64
   val_batch_size: 64

@@ -285,6 +285,88 @@ class DataGenerator(Sequence):
                 img_features = img_features.ravel()
         return img_features
 
+    def _pool_cnn_output(self, img_features):
+        if not self.process:
+            return np.asarray(img_features, dtype=np.float32).ravel()
+        if self.global_pooling == 'max':
+            out = np.squeeze(img_features)
+            out = np.amax(out, axis=0)
+            out = np.amax(out, axis=0)
+            return np.asarray(out, dtype=np.float32)
+        if self.global_pooling == 'avg':
+            out = np.squeeze(img_features)
+            out = np.average(out, axis=0)
+            out = np.average(out, axis=0)
+            return np.asarray(out, dtype=np.float32)
+        return np.asarray(img_features, dtype=np.float32).ravel()
+
+    def _ensure_live_convnet(self):
+        if getattr(self, '_live_convnet', None) is not None:
+            return
+        backbone = self.opts.get('backbone', 'vgg16')
+        backbone_dict = {'vgg16': vgg16.VGG16, 'resnet50': resnet50.ResNet50, 'mobilenet': mobilenet.MobileNet}
+        if backbone not in backbone_dict:
+            raise ValueError('Unsupported backbone for live visual: %s' % backbone)
+        self._live_convnet = backbone_dict[backbone](
+            input_shape=(224, 224, 3), include_top=False, weights='imagenet')
+        self._live_preprocess = {
+            'vgg16': vgg16.preprocess_input,
+            'resnet50': resnet50.preprocess_input,
+            'mobilenet': mobilenet.preprocess_input,
+        }[backbone]
+
+    def _live_visual_vector(self, spec, out_dim):
+        getter = self.opts.get('_live_visual_parent')
+        if getter is None:
+            raise RuntimeError(
+                'Live visual features require opts["_live_visual_parent"] (internal wiring).')
+        (_, imp, bbox, crop_type, crop_resize_ratio, crop_mode, flip_image, target_size) = spec
+        if not self.process:
+            raise ValueError('visual_disk_cache=False requires process=True for CNN features.')
+        self._ensure_live_convnet()
+        convnet = self._live_convnet
+        preprocess_input = self._live_preprocess
+
+        img_data = cv2.imread(str(imp))
+        if img_data is None:
+            return np.zeros((out_dim,), dtype=np.float32)
+        if flip_image:
+            img_data = cv2.flip(img_data, 1)
+        b = np.asarray(bbox, dtype=np.float32)
+
+        if crop_type == 'none':
+            img_features = cv2.resize(img_data, (target_size, target_size))
+        elif crop_type == 'bbox':
+            bb = list(map(int, b[0:4]))
+            cropped_image = img_data[bb[1]:bb[3], bb[0]:bb[2], :]
+            img_features = getter.img_pad(cropped_image, mode=crop_mode, size=target_size)
+        elif 'context' in crop_type:
+            bbox_j = getter.jitter_bbox(str(imp), [b.tolist()], 'enlarge', crop_resize_ratio)[0]
+            bbox_j = getter.squarify(bbox_j, 1, img_data.shape[1])
+            bbox_i = list(map(int, bbox_j[0:4]))
+            cropped_image = img_data[bbox_i[1]:bbox_i[3], bbox_i[0]:bbox_i[2], :]
+            img_features = getter.img_pad(cropped_image, mode='pad_resize', size=target_size)
+        elif 'surround' in crop_type:
+            img_work = np.copy(img_data)
+            b_org = list(map(int, b[0:4])).copy()
+            bbox_j = getter.jitter_bbox(str(imp), [b.tolist()], 'enlarge', crop_resize_ratio)[0]
+            bbox_j = getter.squarify(bbox_j, 1, img_work.shape[1])
+            bbox_i = list(map(int, bbox_j[0:4]))
+            img_work[b_org[1]:b_org[3], b_org[0]:b_org[2], :] = 128
+            cropped_image = img_work[bbox_i[1]:bbox_i[3], bbox_i[0]:bbox_i[2], :]
+            img_features = getter.img_pad(cropped_image, mode='pad_resize', size=target_size)
+        else:
+            raise ValueError('ERROR: Undefined crop_type for live visual: %s' % crop_type)
+
+        if preprocess_input is not None:
+            img_features = preprocess_input(img_features)
+        expanded_img = np.expand_dims(img_features, axis=0)
+        raw = convnet.predict(expanded_img, verbose=0)
+        vec = self._pool_cnn_output(raw)
+        if vec.size != out_dim:
+            raise ValueError('Live visual vector dim mismatch: got %s expected %s' % (vec.size, out_dim))
+        return vec
+
     def _normalize_box(self, X, label=False):
         new_X = X.copy()
         if label:
@@ -314,7 +396,14 @@ class DataGenerator(Sequence):
             for i, index in enumerate(indices):
                 noise = np.random.normal(0,1, (self.data_sizes[input_type_idx][0], self.data_sizes[input_type_idx][1]))
                 prob = rn.uniform(0,1)
-                if isinstance(self.data[input_type_idx][index][0], str):
+                cell0 = self.data[input_type_idx][index][0]
+                if isinstance(cell0, tuple) and len(cell0) > 0 and cell0[0] == '__LIVE_VISUAL__':
+                    out_dim = int(self.data_sizes[input_type_idx][-1])
+                    seq_specs = self.data[input_type_idx][index]
+                    for j, spec in enumerate(seq_specs):
+                        vec = self._live_visual_vector(spec, out_dim)
+                        features_batch[i, j, :] = vec
+                elif isinstance(cell0, str):
                     cached_path_list = self.data[input_type_idx][index]
                     for j, cached_path in enumerate(cached_path_list):
                         img_features = self._get_img_features(cached_path)
@@ -361,6 +450,7 @@ class DataGetter(object):
 
     def get_data(self):
         self._generator = self.model_opts.get('generator', False)
+        self._backbone = self.model_opts.get('backbone', self._backbone)
         data_type_sizes_dict = {}
         process = self.model_opts.get('process', True)
         dataset = self.model_opts['dataset']
@@ -399,6 +489,8 @@ class DataGetter(object):
             batch_size = self.model_opts['batch_size']
 
         if self._generator:
+            gen_opts = dict(self.model_opts)
+            gen_opts['_live_visual_parent'] = self
             _data = (DataGenerator(data=_data,
                                    labels=[data['crossing'], data['goals'], data['tte']],
                                    data_sizes=data_sizes,
@@ -408,7 +500,7 @@ class DataGetter(object):
                                    batch_size=batch_size if (self.data_type=='train' or self.data_type=='val') else 1,
                                    shuffle=self.data_type != 'test',
                                    to_fit=self.data_type != 'test',
-                                   opts=self.model_opts), data['labels'], data['lens'])
+                                   opts=gen_opts), data['labels'], data['lens'])
         else:
             _data = (_data, data['crossing'])
 
@@ -575,13 +667,31 @@ class DataGetter(object):
         save_folder_name = '_'.join([feature_type, aux_name])
         if 'local_context' in feature_type or 'surround' in feature_type:
             save_folder_name = '_'.join([save_folder_name, str(eratio)])
-        data_gen_params['save_path'],_ = self.get_path(save_folder=save_folder_name,
-                                         dataset=dataset, save_root_folder='data/features')
+        disk_cache = self.model_opts.get('visual_disk_cache', True)
+        data_gen_params['disk_cache'] = disk_cache
+        if disk_cache:
+            data_gen_params['save_path'], _ = self.get_path(
+                save_folder=save_folder_name,
+                dataset=dataset,
+                save_root_folder='data/features',
+            )
+        else:
+            data_gen_params['save_path'] = None
         return self.load_images_crop_and_process(data['image'],
                                                  data['box'],
                                                  data['ped_id'],
                                                  process=process,
                                                  **data_gen_params)
+
+    @staticmethod
+    def spatial_backbone_vector_dim(backbone, global_pooling):
+        spatial = {'vgg16': (7, 7, 512), 'resnet50': (7, 7, 2048), 'mobilenet': (7, 7, 1024)}
+        if backbone not in spatial:
+            raise ValueError('Unsupported backbone for live visual features: %s' % backbone)
+        shp = spatial[backbone]
+        if global_pooling in ['max', 'avg']:
+            return int(shp[-1])
+        return int(np.prod(shp))
 
 
     def jitter_bbox(self, img_path, bbox, mode, ratio):
@@ -697,24 +807,33 @@ class DataGetter(object):
                                      crop_resize_ratio=2,
                                      target_dim=(224, 224),
                                      process=True,
-                                     regen_data=False):
+                                     regen_data=False,
+                                     disk_cache=True):
 
         print("Generating {} features crop_type={} crop_mode={}\
-              \nsave_path={}, ".format(data_type, crop_type, crop_mode,
-                                       save_path))
+              \nsave_path={}, disk_cache={}".format(
+                  data_type, crop_type, crop_mode, save_path, disk_cache))
+        if not disk_cache and not self._generator:
+            raise ValueError(
+                'visual_disk_cache=False is only supported when model_opts["generator"] is True.')
         preprocess_dict = {'vgg16': vgg16.preprocess_input, 'resnet50': resnet50.preprocess_input, 'mobilenet': mobilenet.preprocess_input}
         backbone_dict = {'vgg16': vgg16.VGG16, 'resnet50': resnet50.ResNet50, 'mobilenet': mobilenet.MobileNet}
-        print("Backbone Models Loaded ......")
-
         preprocess_input = preprocess_dict.get(self._backbone, None)
         print("Preprocessing Model:", self._backbone)
         if process:
             assert (self._backbone in ['vgg16', 'resnet50', 'mobilenet']), "{} is not supported".format(self._backbone)
 
-        print("Initializing Preprocessin Model.......")
-        convnet =  backbone_dict[self._backbone](input_shape=(224, 224, 3), include_top=False, weights="imagenet")
+        skip_convnet_init = self._generator and not disk_cache
+        if skip_convnet_init:
+            print("visual_disk_cache=False with generator=True: no disk cache and no upfront CNN pass.")
+            print("Visual features will be computed on-the-fly each batch (slower epochs, zero feature-cache storage).")
+            convnet = None
+        else:
+            print("Backbone Models Loaded ......")
+            print("Initializing Preprocessin Model.......")
+            convnet = backbone_dict[self._backbone](input_shape=(224, 224, 3), include_top=False, weights="imagenet")
+            print("Preprocessing Model Initialized........")
 
-        print("Preprocessing Model Initialized........")
         sequences = []
         bbox_seq = bbox_sequences.copy()
         i = -1
@@ -725,6 +844,19 @@ class DataGetter(object):
             for imp, b, p in zip(seq, bbox_seq[i], pid):
                 flip_image = False
                 imp_norm = str(imp).replace('\\', '/')
+
+                if skip_convnet_init:
+                    imp_read = str(imp)
+                    if 'flip' in imp_read.replace('\\', '/'):
+                        imp_read = imp_read.replace('_flip', '')
+                        flip_image = True
+                    b_copy = np.asarray(b, dtype=np.float32).copy()
+                    ts = int(target_dim[0]) if isinstance(target_dim, (list, tuple, np.ndarray)) else int(target_dim)
+                    img_seq.append(
+                        ('__LIVE_VISUAL__', imp_read, b_copy, crop_type, crop_resize_ratio,
+                         crop_mode, flip_image, ts))
+                    continue
+
                 # Prefer RECORD/DRIVE ids when present in path; fallback to trailing folders.
                 rd_match = re.search(r'(RECORD[^/]+)/?(DRIVE[^/]+)?/frames/', imp_norm)
                 if rd_match:
@@ -818,16 +950,20 @@ class DataGetter(object):
         sequences = np.array(sequences)
         # compute size of the features after the processing
         if self._generator:
-            with open(sequences[0][0], 'rb') as fid:
-                feat_shape = pickle.load(fid).shape
-            if process:
-                if self._global_pooling in ['max', 'avg']:
-                    feat_shape = feat_shape[-1]
-                else:
-                    feat_shape = np.prod(feat_shape)
-            if not isinstance(feat_shape, tuple):
-                feat_shape = (feat_shape,)
-            feat_shape = (np.array(bbox_sequences).shape[1],) + feat_shape
+            if skip_convnet_init:
+                dim = self.spatial_backbone_vector_dim(self._backbone, self._global_pooling)
+                feat_shape = (int(np.array(bbox_sequences).shape[1]), dim)
+            else:
+                with open(sequences[0][0], 'rb') as fid:
+                    feat_shape = pickle.load(fid).shape
+                if process:
+                    if self._global_pooling in ['max', 'avg']:
+                        feat_shape = feat_shape[-1]
+                    else:
+                        feat_shape = np.prod(feat_shape)
+                if not isinstance(feat_shape, tuple):
+                    feat_shape = (feat_shape,)
+                feat_shape = (np.array(bbox_sequences).shape[1],) + feat_shape
         else:
             feat_shape = sequences.shape[1:]
 
