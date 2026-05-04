@@ -35,4 +35,9 @@ data_opts:
   data_split_type: default
   seq_type: crossing
   min_track_size: 16
+  # Preferred split-aware paths for custom_json:
+  path_to_json_train: /home/bkaradurak/Projects/ObjectMotionDetection/01-Code/prevention-data-check/splits/train.json
+  path_to_json_val: /home/bkaradurak/Projects/ObjectMotionDetection/01-Code/prevention-data-check/splits/val.json
+  path_to_json_test: /home/bkaradurak/Projects/ObjectMotionDetection/01-Code/prevention-data-check/splits/test.json
+  # Legacy single-file mode (train=val=test) if split paths are not provided:
   path_to_json: /home/bkaradurak/Projects/ObjectMotionDetection/01-Code/prevention-data-check/Train.json
