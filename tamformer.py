@@ -41,7 +41,7 @@ class TransformerBlock(layers.Layer):
         self.dropout2 = layers.Dropout(rate)
         self.normalization = normalization
 
-    def call(self, inputs, training, attention_mask=None):
+    def call(self, inputs, training=None, attention_mask=None):
         if self.cross_attention:
             if (attention_mask is not None) and (not training):
                 attention_mask = keras.ops.round(attention_mask)
