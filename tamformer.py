@@ -2,11 +2,10 @@ import os
 import sys
 import yaml
 import numpy as np
-import tensorflow as tf
 import random as rn
 import copy
 from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Input, Dense, Dropout, Lambda, Concatenate, BatchNormalization, Softmax, Flatten, Add, Activation
+from tensorflow.keras.layers import Input, Dense, Dropout, Lambda, Concatenate, BatchNormalization, Softmax, Flatten, Add, Activation, Subtract
 from tensorflow.keras import layers, activations
 from tensorflow import keras
 
@@ -45,7 +44,7 @@ class TransformerBlock(layers.Layer):
     def call(self, inputs, training, attention_mask=None):
         if self.cross_attention:
             if (attention_mask is not None) and (not training):
-                attention_mask = tf.round(attention_mask)
+                attention_mask = keras.ops.round(attention_mask)
             attn_output = self.att(inputs[0], inputs[1], attention_mask=attention_mask)
             attn_output = self.dropout1(attn_output, training=training)
             if self.normalization:
@@ -54,7 +53,7 @@ class TransformerBlock(layers.Layer):
                 out1 = inputs[0] + attn_output
         else:
             if (attention_mask is not None) and (not training):
-                attention_mask = tf.round(attention_mask)
+                attention_mask = keras.ops.round(attention_mask)
             attn_output = self.att(inputs, inputs, attention_mask=attention_mask)
             attn_output = self.dropout1(attn_output, training=training)
             if self.normalization:
@@ -76,7 +75,7 @@ class QueryEmbedding(layers.Layer):
         self.num_of_queries = num_of_queries
 
     def call(self, x):
-        queries = tf.range(start=0, limit=self.num_of_queries, delta=1)
+        queries = keras.ops.arange(0, self.num_of_queries, 1)
         queries = self.query_emb(queries)
         return queries
 
@@ -84,11 +83,11 @@ class QueryEmbedding(layers.Layer):
 class PositionEmbedding(layers.Layer):
     def __init__(self, maxlen, embed_dim):
         super(PositionEmbedding, self).__init__()
+        self.maxlen = maxlen
         self.pos_emb = layers.Embedding(input_dim=maxlen, output_dim=embed_dim)
 
     def call(self, x):
-        maxlen = tf.shape(x)[1]
-        positions = tf.range(start=0, limit=maxlen, delta=1)
+        positions = keras.ops.arange(0, self.maxlen, 1)
         positions = self.pos_emb(positions)
         return x + positions
 
@@ -112,11 +111,19 @@ class TAMformer(object):
 
         masking_models_obs = [masking_models(final_out=i + 1) for i in range(obs_length)]
 
-        masks_obs = [tf.expand_dims(masking_models_obs[i](Lambda(lambda s, i=i: s[:,i])(concatenated_inputs)), 1)
-                     for i in range(obs_length)]
-        masks_obs = [tf.keras.layers.ZeroPadding1D((0, obs_length - masks_obs[i].shape[-1]))(tf.transpose(masks_obs[i], [0,2,1]))
-                     for i in range(obs_length)]
-        masks_obs = [tf.transpose(masks_obs[i], [0,2,1]) for i in range(obs_length)]
+        def _transpose_time_feat(x):
+            return keras.ops.transpose(x, (0, 2, 1))
+
+        masks_obs = []
+        for i in range(obs_length):
+            t_i = Lambda(lambda s, i=i: s[:, i])(concatenated_inputs)
+            m = masking_models_obs[i](t_i)
+            m = Lambda(lambda x: keras.ops.expand_dims(x, axis=1))(m)
+            m = Lambda(_transpose_time_feat)(m)
+            pad_right = obs_length - (i + 1)
+            m = layers.ZeroPadding1D((0, pad_right))(m)
+            m = Lambda(_transpose_time_feat)(m)
+            masks_obs.append(m)
         masks_obs = Concatenate(axis=1)(masks_obs)
 
         transformer_blocks = [TransformerBlock(feat_sizes[i], 6, 1024, normalization=True, cross_attention=False)\
@@ -140,9 +147,10 @@ class TAMformer(object):
         model = Model(inputs, outputs, name='tamformer')
 
         if self.auxiliary_loss:
-            to_add_losses = []
-            mse = tf.square(Lambda(lambda s: s[:,0])(cross_transformer_block) - Lambda(lambda s: s[:,0])(query_transformer))
-            to_add_losses.append(tf.reduce_mean(mse))
-            model.add_loss(to_add_losses)
+            cross0 = Lambda(lambda s: s[:, 0])(cross_transformer_block)
+            query0 = Lambda(lambda s: s[:, 0])(query_transformer)
+            diff = Subtract()([cross0, query0])
+            aux = Lambda(lambda d: keras.ops.mean(keras.ops.square(d)))(diff)
+            model.add_loss(aux)
 
         return model
