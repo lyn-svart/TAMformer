@@ -20,12 +20,9 @@ model_opts:
   #   (val/test stay live to reduce disk growth).
   # - visual_cache_pooled: true stores pooled vectors instead of full feature maps
   #   (dramatically less disk and faster cache reads).
-  # - visual_cache_sharded: true stores one cache file per sequence
-  #   instead of one file per frame (much faster writes on slow disks).
   visual_disk_cache: true
   visual_disk_cache_train_only: true
   visual_cache_pooled: true
-  visual_cache_sharded: true
   obs_seconds: 1
   batch_size: 64
   val_batch_size: 64

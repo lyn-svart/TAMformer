@@ -247,7 +247,6 @@ class DataGenerator(Sequence):
         self.indices = None
         self.on_epoch_end()
         self.opts = opts
-        self._shard_cache = {}
 
     def get_size(self):
         return len(self.data[0])
@@ -268,23 +267,11 @@ class DataGenerator(Sequence):
         return tuple(X), y
 
     def _get_img_features(self, cached_path):
-        shard_sep = '::idx='
-        if shard_sep in cached_path:
-            shard_path, shard_idx = cached_path.rsplit(shard_sep, 1)
-            shard_idx = int(shard_idx)
-            if shard_path not in self._shard_cache:
-                with open(shard_path, 'rb') as fid:
-                    try:
-                        self._shard_cache[shard_path] = pickle.load(fid)
-                    except:
-                        self._shard_cache[shard_path] = pickle.load(fid, encoding='bytes')
-            img_features = self._shard_cache[shard_path][shard_idx]
-        else:
-            with open(cached_path, 'rb') as fid:
-                try:
-                    img_features = pickle.load(fid)
-                except:
-                    img_features = pickle.load(fid, encoding='bytes')
+        with open(cached_path, 'rb') as fid:
+            try:
+                img_features = pickle.load(fid)
+            except:
+                img_features = pickle.load(fid, encoding='bytes')
         img_features = np.asarray(img_features)
         # If cache already stores pooled vectors, return directly.
         if img_features.ndim <= 1:
@@ -866,8 +853,6 @@ class DataGetter(object):
 
         skip_convnet_init = self._generator and not disk_cache
         cache_pooled_visual = bool(self.model_opts.get('visual_cache_pooled', False))
-        cache_sharded = bool(self.model_opts.get('visual_cache_sharded', False)) and self._generator and disk_cache
-        shard_sep = '::idx='
         if skip_convnet_init:
             print("visual_disk_cache=False with generator=True: no disk cache and no upfront CNN pass.")
             print("Visual features will be computed on-the-fly each batch (slower epochs, zero feature-cache storage).")
@@ -885,25 +870,6 @@ class DataGetter(object):
             i += 1
             self.update_progress(i / len(img_sequences))
             img_seq = []
-            shard_save_path = None
-            shard_features = []
-            if cache_sharded and len(seq) > 0:
-                seq0_norm = str(seq[0]).replace('\\', '/')
-                rd_match = re.search(r'(RECORD[^/]+)/?(DRIVE[^/]+)?/frames/', seq0_norm)
-                if rd_match:
-                    set_id = rd_match.group(1)
-                    vid_id = rd_match.group(2) if rd_match.group(2) else 'unknown_drive'
-                else:
-                    parts = seq0_norm.split('/')
-                    set_id = parts[-3] if len(parts) >= 3 else 'unknown_set'
-                    vid_id = parts[-2] if len(parts) >= 2 else 'unknown_vid'
-                shard_folder = os.path.join(save_path, set_id, vid_id)
-                shard_save_path = os.path.join(shard_folder, 'seq_{:08d}.pkl'.format(i))
-                if os.path.exists(shard_save_path) and not regen_data:
-                    for j in range(len(seq)):
-                        img_seq.append(shard_save_path + shard_sep + str(j))
-                    sequences.append(img_seq)
-                    continue
             for imp, b, p in zip(seq, bbox_seq[i], pid):
                 flip_image = False
                 imp_norm = str(imp).replace('\\', '/')
@@ -941,7 +907,7 @@ class DataGetter(object):
                     img_save_path = os.path.join(img_save_folder, img_name + '_' + pid_token + '.pkl')
 
                 # Check whether the file exists
-                if os.path.exists(img_save_path) and not regen_data and not cache_sharded:
+                if os.path.exists(img_save_path) and not regen_data:
                     if not self._generator:
                         with open(img_save_path, 'rb') as fid:
                             try:
@@ -989,14 +955,11 @@ class DataGetter(object):
                     cache_obj = img_features
                     if process and cache_pooled_visual:
                         cache_obj = self._pool_cnn_output(img_features)
-                    if cache_sharded:
-                        shard_features.append(cache_obj)
-                    else:
-                        # Save the file
-                        if not os.path.exists(img_save_folder):
-                            os.makedirs(img_save_folder, exist_ok=True)
-                        with open(img_save_path, 'wb') as fid:
-                            pickle.dump(cache_obj, fid, pickle.HIGHEST_PROTOCOL)
+                    # Save the file
+                    if not os.path.exists(img_save_folder):
+                        os.makedirs(img_save_folder, exist_ok=True)
+                    with open(img_save_path, 'wb') as fid:
+                        pickle.dump(cache_obj, fid, pickle.HIGHEST_PROTOCOL)
 
                 # if using the generator save the cached features path and size of the features
                 if process and not self._generator:
@@ -1012,16 +975,9 @@ class DataGetter(object):
                         img_features = img_features.ravel()
 
                 if self._generator:
-                    if cache_sharded:
-                        img_seq.append(shard_save_path + shard_sep + str(len(shard_features) - 1))
-                    else:
-                        img_seq.append(img_save_path)
+                    img_seq.append(img_save_path)
                 else:
                     img_seq.append(img_features)
-            if cache_sharded:
-                os.makedirs(os.path.dirname(shard_save_path), exist_ok=True)
-                with open(shard_save_path, 'wb') as fid:
-                    pickle.dump(shard_features, fid, pickle.HIGHEST_PROTOCOL)
             sequences.append(img_seq)
         # Live specs are (path, bbox, ...) tuples; np.array() would try to stack them into a broken ndarray.
         if skip_convnet_init:
@@ -1038,15 +994,8 @@ class DataGetter(object):
                 dim = self.spatial_backbone_vector_dim(self._backbone, self._global_pooling)
                 feat_shape = (int(np.array(bbox_sequences).shape[1]), dim)
             else:
-                probe = sequences[0][0]
-                if shard_sep in probe:
-                    shard_path, shard_idx = probe.rsplit(shard_sep, 1)
-                    with open(shard_path, 'rb') as fid:
-                        shard_data = pickle.load(fid)
-                    feat_shape = np.asarray(shard_data[int(shard_idx)]).shape
-                else:
-                    with open(probe, 'rb') as fid:
-                        feat_shape = np.asarray(pickle.load(fid)).shape
+                with open(sequences[0][0], 'rb') as fid:
+                    feat_shape = pickle.load(fid).shape
                 if process:
                     if self._global_pooling in ['max', 'avg']:
                         feat_shape = feat_shape[-1]
