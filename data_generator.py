@@ -27,8 +27,11 @@ class TrackJSONAdapter(object):
         'standing': 4
     }
 
-    def __init__(self, json_path):
+    def __init__(self, json_path, chunk_dt=10):
+        """chunk_dt: if set, emit sliding windows of length chunk_dt+1 (frames i..i+chunk_dt).
+        If None, emit one sample per full track (previous behavior)."""
         self.json_path = json_path
+        self.chunk_dt = chunk_dt
 
     @staticmethod
     def _safe_float(value, default=0.0):
@@ -110,6 +113,7 @@ class TrackJSONAdapter(object):
             seq_centers = []
             seq_acts = []
             seq_speed = []
+            seq_dims = []
 
             for _, frame_path, obj in samples:
                 img_w = int(obj.get('img_width', 1920))
@@ -131,14 +135,30 @@ class TrackJSONAdapter(object):
                 seq_centers.append([cx, cy])
                 seq_acts.append([class_id])
                 seq_speed.append([speed])
+                seq_dims.append((img_w, img_h))
 
-            image_seq.append(seq_images)
-            pids_seq.append(seq_pids)
-            box_seq.append(seq_boxes)
-            center_seq.append(seq_centers)
-            activities.append(seq_acts)
-            obds_seq.append(seq_speed)
-            image_dims.append((img_w, img_h))
+            if self.chunk_dt is None:
+                image_seq.append(seq_images)
+                pids_seq.append(seq_pids)
+                box_seq.append(seq_boxes)
+                center_seq.append(seq_centers)
+                activities.append(seq_acts)
+                obds_seq.append(seq_speed)
+                image_dims.append(seq_dims[-1])
+            else:
+                window = int(self.chunk_dt) + 1
+                n = len(seq_images)
+                if n < window:
+                    continue
+                for start in range(0, n - window + 1):
+                    end = start + window
+                    image_seq.append(seq_images[start:end])
+                    pids_seq.append(seq_pids[start:end])
+                    box_seq.append(seq_boxes[start:end])
+                    center_seq.append(seq_centers[start:end])
+                    activities.append(seq_acts[start:end])
+                    obds_seq.append(seq_speed[start:end])
+                    image_dims.append(seq_dims[end - 1])
 
         print("Loaded {} track-centered sequences from {}".format(len(image_seq), self.json_path))
         class_values = [seq[-1][0] for seq in activities if len(seq) > 0]

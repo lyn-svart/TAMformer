@@ -38,7 +38,10 @@ def run(config_path, auxiliary_loss, test, resume):
     dataset_name = configs['model_opts']['dataset']
     if dataset_name == 'custom_json':
         json_path = configs['data_opts']['path_to_json']
-        adapter = TrackJSONAdapter(json_path)
+        chunk_dt = configs['data_opts'].get('chunk_dt', 10)
+        if chunk_dt is not None:
+            chunk_dt = int(chunk_dt)
+        adapter = TrackJSONAdapter(json_path, chunk_dt=chunk_dt)
         data_raw_train = adapter.load()
         # train-only mode: use the same split as val/test unless user provides separate files.
         data_raw_test = copy.deepcopy(data_raw_train)
