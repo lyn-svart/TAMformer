@@ -21,7 +21,7 @@ model_opts:
   # - visual_cache_pooled: true stores pooled vectors instead of full feature maps
   #   (dramatically less disk and faster cache reads).
   visual_disk_cache: true
-  visual_disk_cache_train_only: true
+  visual_disk_cache_train_only: false
   visual_cache_pooled: true
   obs_seconds: 1
   batch_size: 64
