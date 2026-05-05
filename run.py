@@ -155,7 +155,12 @@ def run(config_path, auxiliary_loss, test, resume):
     if test or resume:
         load_path = _weights_file_to_load()
         print("Lodaing " + load_path + " ...")
-        tamformer.load_weights(load_path, by_name=False, skip_mismatch=False)
+        # Keras 3 no longer accepts `by_name` for the new `.weights.h5` format.
+        # Keep a legacy path for old `.h5` checkpoints.
+        if load_path.endswith(".weights.h5"):
+            tamformer.load_weights(load_path)
+        else:
+            tamformer.load_weights(load_path, by_name=False, skip_mismatch=False)
     if not test:
         class_w = class_weights(configs['model_opts']['apply_class_weights'],
                                      data_train['count'],
