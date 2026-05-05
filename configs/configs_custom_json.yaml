@@ -1,7 +1,7 @@
 model_opts:
   model: Static
-  backbone: mobilenet #vgg16
-  obs_input_type: [box, speed, local_context]
+  backbone: vgg16
+  obs_input_type: [box, local_context]
   enlarge_ratio: 1.5
   obs_length: 16
   time_to_event: 30
@@ -20,7 +20,7 @@ model_opts:
   #   (val/test stay live to reduce disk growth).
   # - visual_cache_pooled: true stores pooled vectors instead of full feature maps
   #   (dramatically less disk and faster cache reads).
-  visual_disk_cache: true
+  visual_disk_cache: false
   visual_disk_cache_train_only: false
   visual_cache_pooled: true
   obs_seconds: 1
