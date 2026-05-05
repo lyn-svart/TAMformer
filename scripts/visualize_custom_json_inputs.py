@@ -121,7 +121,7 @@ def main():
     parser.add_argument("--dataset_root", type=str, default=None, help="Optional root folder to resolve frame paths.")
     parser.add_argument("--frames_root", type=str, default=None, help="Optional explicit directory that contains frame images.")
     parser.add_argument("--track_id", type=str, default=None, help="Track ID to inspect (default: random).")
-    parser.add_argument("--num_frames", type=int, default=6, help="How many timesteps to render.")
+    parser.add_argument("--num_frames", type=int, default=9, help="How many timesteps to render (max 9 for 3x3).")
     parser.add_argument("--save_path", type=str, default="input_sanity.png", help="Output image path.")
     args = parser.parse_args()
 
@@ -138,19 +138,19 @@ def main():
     if not entries:
         raise RuntimeError(f"Track {tid} has no entries.")
 
-    k = min(max(1, args.num_frames), len(entries))
+    k = min(max(1, args.num_frames), len(entries), 9)
     sampled = entries[-k:]
     json_dir = os.path.dirname(os.path.abspath(args.json_path))
     search_roots = [args.frames_root, args.dataset_root, json_dir]
     basename_index, rel_index = _build_basename_index(search_roots)
 
-    fig, axes = plt.subplots(1, k, figsize=(4 * k, 4))
-    if k == 1:
-        axes = [axes]
+    rows, cols = 3, 3
+    fig, axes = plt.subplots(rows, cols, figsize=(12, 12))
+    axes = axes.flatten()
 
     rendered = 0
     unresolved_examples = []
-    for ax, (frame_path, obj) in zip(axes, sampled):
+    for ax, (frame_path, obj) in zip(axes[:k], sampled):
         record_name, drive_name = _extract_record_drive(frame_path)
         resolved = _resolve_frame_path(
             frame_path,
@@ -185,7 +185,10 @@ def main():
         print(f"Frame source: {record_name}/{drive_name} | json={frame_path} | resolved={resolved}")
         rendered += 1
 
-    fig.suptitle(f"Track {tid} | rendered {rendered}/{k} frames", fontsize=12)
+    for ax in axes[k:]:
+        ax.axis("off")
+
+    fig.suptitle(f"Track {tid} | rendered {rendered}/{k} frames (3x3)", fontsize=12)
     fig.tight_layout()
     fig.savefig(args.save_path, dpi=140)
     print(f"Saved visualization: {args.save_path}")
