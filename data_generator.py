@@ -870,7 +870,24 @@ class DataGetter(object):
             i += 1
             self.update_progress(i / len(img_sequences))
             img_seq = []
-            for imp, b, p in zip(seq, bbox_seq[i], pid):
+            fixed_context_window = bool(self.model_opts.get('context_fixed_window', False))
+            fixed_context_anchor = str(self.model_opts.get('context_fixed_window_anchor', 'first')).lower()
+            seq_bbox_used = list(bbox_seq[i])
+            # Optional: keep one context/surround crop window for the whole sequence.
+            # This preserves temporal scale cues (object getting bigger/smaller in-place).
+            if fixed_context_window and (('context' in crop_type) or ('surround' in crop_type)) and len(seq_bbox_used) > 0:
+                anchor_idx = 0 if fixed_context_anchor != 'last' else (len(seq_bbox_used) - 1)
+                anchor_imp = seq[anchor_idx]
+                anchor_bbox = np.asarray(seq_bbox_used[anchor_idx], dtype=np.float32).copy()
+                try:
+                    anchor_ctx = self.jitter_bbox(anchor_imp, [anchor_bbox.copy()], 'enlarge', crop_resize_ratio)[0]
+                    anchor_ctx = self.squarify(anchor_ctx, 1, cv2.imread(str(anchor_imp)).shape[1])
+                    anchor_ctx = np.asarray(anchor_ctx, dtype=np.float32)
+                    seq_bbox_used = [anchor_ctx.copy() for _ in range(len(seq_bbox_used))]
+                except Exception:
+                    # Fallback to per-frame context behavior if anchor frame cannot be resolved.
+                    pass
+            for imp, b, p in zip(seq, seq_bbox_used, pid):
                 flip_image = False
                 imp_norm = str(imp).replace('\\', '/')
 
