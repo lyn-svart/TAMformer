@@ -207,6 +207,20 @@ def _crop_for_visual_sample(img, box, crop_type='bbox', enlarge_ratio=1.5):
     return img.copy()
 
 
+def _render_preview_tile(img, box, crop_type, enlarge_ratio, target_dim):
+    """Render tile the same way image crop is fed to backbone (before preprocess_input)."""
+    cropped = _crop_for_visual_sample(img, box, crop_type=crop_type, enlarge_ratio=enlarge_ratio)
+    if cropped is None:
+        return None
+    if isinstance(target_dim, (list, tuple)) and len(target_dim) >= 2:
+        tw, th = int(target_dim[0]), int(target_dim[1])
+    else:
+        tw, th = int(target_dim), int(target_dim)
+    tw = max(1, tw)
+    th = max(1, th)
+    return cv2.resize(cropped, (tw, th), interpolation=cv2.INTER_AREA)
+
+
 def _sample_diverse_indices(total, count):
     """Pick evenly spread indices across the full test set."""
     if total <= 0 or count <= 0:
@@ -255,7 +269,9 @@ def _save_visual_inference_samples(
         sample_count=3,
         num_frames=9,
         crop_type='bbox',
-        enlarge_ratio=1.5):
+        enlarge_ratio=1.5,
+        target_dim=(224, 224),
+        draw_header=False):
     """
     Save visual grids for a few test samples.
 
@@ -295,11 +311,13 @@ def _save_visual_inference_samples(
             if img is None:
                 rendered.append(None)
                 continue
-            img = _crop_for_visual_sample(img, box, crop_type=crop_type, enlarge_ratio=enlarge_ratio)
-            record, drive, frame_name = _extract_record_drive_frame(frame_path)
-            tile_label = "{}/{}/{}".format(record, drive, frame_name)
-            cv2.putText(img, tile_label, (8, max(20, img.shape[0] - 10)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1, cv2.LINE_AA)
+            img = _render_preview_tile(
+                img,
+                box,
+                crop_type=crop_type,
+                enlarge_ratio=enlarge_ratio,
+                target_dim=target_dim,
+            )
             rendered.append(img)
 
         last_frame_path = seq_imgs[-1]
@@ -317,7 +335,8 @@ def _save_visual_inference_samples(
                 int(i), int(y_true[i]), int(y_pred[i]), conf, crop_type, record, drive, frame_name
             )
         mosaic = _mosaic_grid(rendered, rows=3, cols=3, tile_size=360)
-        mosaic = _draw_label(mosaic, header)
+        if draw_header:
+            mosaic = _draw_label(mosaic, header)
 
         if conf is None:
             out_name = "test_sample_{:03d}_idx{:05d}_{}_{}_{}_t{}_p{}.jpg".format(
@@ -431,6 +450,8 @@ def run(config_path, auxiliary_loss, test, resume):
                 if preview_crop_type == 'auto':
                     preview_crop_type = _resolve_visual_crop_type(configs['model_opts'].get('obs_input_type', []))
                 preview_enlarge_ratio = float(configs['model_opts'].get('enlarge_ratio', 1.5))
+                preview_target_dim = configs['model_opts'].get('target_dim', (224, 224))
+                preview_draw_header = bool(configs['model_opts'].get('visual_sample_draw_header', False))
                 print("\nCreating visual input preview before training...")
                 _save_visual_inference_samples(
                     data_raw_test,
@@ -442,6 +463,8 @@ def run(config_path, auxiliary_loss, test, resume):
                     num_frames=preview_frames,
                     crop_type=preview_crop_type,
                     enlarge_ratio=preview_enlarge_ratio,
+                    target_dim=preview_target_dim,
+                    draw_header=preview_draw_header,
                 )
         class_w = class_weights(configs['model_opts']['apply_class_weights'],
                                      data_train['count'],
@@ -505,6 +528,8 @@ def run(config_path, auxiliary_loss, test, resume):
         if visual_crop_type == 'auto':
             visual_crop_type = _resolve_visual_crop_type(configs['model_opts'].get('obs_input_type', []))
         visual_enlarge_ratio = float(configs['model_opts'].get('enlarge_ratio', 1.5))
+        visual_target_dim = configs['model_opts'].get('target_dim', (224, 224))
+        visual_draw_header = bool(configs['model_opts'].get('visual_sample_draw_header', False))
         _save_visual_inference_samples(
             data_raw_test,
             y_true,
@@ -515,6 +540,8 @@ def run(config_path, auxiliary_loss, test, resume):
             num_frames=visual_frames,
             crop_type=visual_crop_type,
             enlarge_ratio=visual_enlarge_ratio,
+            target_dim=visual_target_dim,
+            draw_header=visual_draw_header,
         )
 
 def class_weights(apply_weights, sample_count, model_opts):
