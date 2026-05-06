@@ -100,6 +100,47 @@ def _print_sample_inferences(y_true, y_pred, y_scores, sample_count=5):
         )
 
 
+def _print_per_class_metrics(y_true, y_pred, y_scores, num_classes):
+    """Print class-wise accuracy/confidence diagnostics."""
+    print("\nPer-class metrics:")
+    header = "{:>7} {:>8} {:>10} {:>10} {:>10} {:>16} {:>16}".format(
+        "class", "support", "acc/recall", "precision", "f1", "avg_true_conf", "avg_pred_conf"
+    )
+    print(header)
+    print("-" * len(header))
+
+    for class_id in range(int(num_classes)):
+        true_mask = (y_true == class_id)
+        pred_mask = (y_pred == class_id)
+        support = int(np.sum(true_mask))
+        pred_count = int(np.sum(pred_mask))
+        tp = int(np.sum(true_mask & pred_mask))
+
+        recall = (tp / support) if support else 0.0  # class accuracy
+        precision = (tp / pred_count) if pred_count else 0.0
+        if precision + recall == 0:
+            f1 = 0.0
+        else:
+            f1 = 2 * precision * recall / (precision + recall)
+
+        if support:
+            avg_true_conf = float(np.mean(y_scores[true_mask, class_id]))
+        else:
+            avg_true_conf = 0.0
+
+        if pred_count:
+            pred_idx = np.where(pred_mask)[0]
+            avg_pred_conf = float(np.mean(y_scores[pred_idx, class_id]))
+        else:
+            avg_pred_conf = 0.0
+
+        print(
+            "{:>7} {:>8} {:>10.4f} {:>10.4f} {:>10.4f} {:>16.4f} {:>16.4f}".format(
+                class_id, support, recall, precision, f1, avg_true_conf, avg_pred_conf
+            )
+        )
+
+
 def _safe_imread(path):
     try:
         return cv2.imread(str(path))
@@ -514,6 +555,7 @@ def run(config_path, auxiliary_loss, test, resume):
           '- f1_weighted:', f1_weighted,
           '- precision_macro:', precision_macro,
           '- recall_macro:', recall_macro)
+    _print_per_class_metrics(y_true, y_pred, test_results, num_classes)
     sample_inference_count = configs['model_opts'].get('sample_inference_count', 5)
     _print_sample_inferences(y_true, y_pred, test_results, sample_inference_count)
 
