@@ -132,6 +132,81 @@ def _mosaic_grid(images_bgr, rows=3, cols=3, tile_size=360):
     return np.vstack(grid_rows)
 
 
+def _safe_bbox_int(box, img_w, img_h):
+    x1, y1, x2, y2 = [int(round(float(v))) for v in box[0:4]]
+    x1 = max(0, min(x1, img_w - 1))
+    x2 = max(0, min(x2, img_w - 1))
+    y1 = max(0, min(y1, img_h - 1))
+    y2 = max(0, min(y2, img_h - 1))
+    if x2 < x1:
+        x1, x2 = x2, x1
+    if y2 < y1:
+        y1, y2 = y2, y1
+    return x1, y1, x2, y2
+
+
+def _resolve_visual_crop_type(obs_input_type):
+    for d in obs_input_type:
+        if 'local_box' in d:
+            return 'bbox'
+        if 'local_context' in d:
+            return 'context'
+        if 'surround' in d:
+            return 'surround'
+        if 'scene_context' in d:
+            return 'none'
+    return 'bbox'
+
+
+def _context_bbox(box, img_w, img_h, enlarge_ratio=1.5):
+    x1, y1, x2, y2 = [float(v) for v in box[0:4]]
+    cx = (x1 + x2) / 2.0
+    cy = (y1 + y2) / 2.0
+    w = max(1.0, (x2 - x1))
+    h = max(1.0, (y2 - y1))
+    side = max(w, h) * float(enlarge_ratio)
+    nx1 = int(round(cx - side / 2.0))
+    ny1 = int(round(cy - side / 2.0))
+    nx2 = int(round(cx + side / 2.0))
+    ny2 = int(round(cy + side / 2.0))
+    nx1 = max(0, min(nx1, img_w - 1))
+    nx2 = max(0, min(nx2, img_w - 1))
+    ny1 = max(0, min(ny1, img_h - 1))
+    ny2 = max(0, min(ny2, img_h - 1))
+    if nx2 <= nx1:
+        nx2 = min(img_w - 1, nx1 + 1)
+    if ny2 <= ny1:
+        ny2 = min(img_h - 1, ny1 + 1)
+    return nx1, ny1, nx2, ny2
+
+
+def _crop_for_visual_sample(img, box, crop_type='bbox', enlarge_ratio=1.5):
+    if img is None:
+        return None
+    h, w = img.shape[:2]
+    x1, y1, x2, y2 = _safe_bbox_int(box, w, h)
+    if crop_type == 'none':
+        out = img.copy()
+        cv2.rectangle(out, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        return out
+    if crop_type == 'bbox':
+        return img[y1:y2 + 1, x1:x2 + 1].copy()
+    if crop_type == 'context':
+        cx1, cy1, cx2, cy2 = _context_bbox([x1, y1, x2, y2], w, h, enlarge_ratio=enlarge_ratio)
+        out = img[cy1:cy2 + 1, cx1:cx2 + 1].copy()
+        return out
+    if crop_type == 'surround':
+        cx1, cy1, cx2, cy2 = _context_bbox([x1, y1, x2, y2], w, h, enlarge_ratio=enlarge_ratio)
+        out = img[cy1:cy2 + 1, cx1:cx2 + 1].copy()
+        rx1 = max(0, x1 - cx1)
+        rx2 = min(out.shape[1] - 1, x2 - cx1)
+        ry1 = max(0, y1 - cy1)
+        ry2 = min(out.shape[0] - 1, y2 - cy1)
+        out[ry1:ry2 + 1, rx1:rx2 + 1, :] = 128
+        return out
+    return img.copy()
+
+
 def _sample_diverse_indices(total, count):
     """Pick evenly spread indices across the full test set."""
     if total <= 0 or count <= 0:
@@ -171,7 +246,16 @@ def _extract_record_drive_frame(frame_path):
     return record, drive, frame_name
 
 
-def _save_visual_inference_samples(data_raw, y_true, y_pred, y_scores, out_dir, sample_count=3, num_frames=9):
+def _save_visual_inference_samples(
+        data_raw,
+        y_true,
+        y_pred,
+        y_scores,
+        out_dir,
+        sample_count=3,
+        num_frames=9,
+        crop_type='bbox',
+        enlarge_ratio=1.5):
     """
     Save visual grids for a few test samples.
 
@@ -211,36 +295,44 @@ def _save_visual_inference_samples(data_raw, y_true, y_pred, y_scores, out_dir, 
             if img is None:
                 rendered.append(None)
                 continue
-            try:
-                x1, y1, x2, y2 = [int(round(float(v))) for v in box[0:4]]
-                x1 = max(0, min(x1, img.shape[1] - 1))
-                x2 = max(0, min(x2, img.shape[1] - 1))
-                y1 = max(0, min(y1, img.shape[0] - 1))
-                y2 = max(0, min(y2, img.shape[0] - 1))
-                cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            except Exception:
-                pass
+            img = _crop_for_visual_sample(img, box, crop_type=crop_type, enlarge_ratio=enlarge_ratio)
             record, drive, frame_name = _extract_record_drive_frame(frame_path)
             tile_label = "{}/{}/{}".format(record, drive, frame_name)
             cv2.putText(img, tile_label, (8, max(20, img.shape[0] - 10)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1, cv2.LINE_AA)
             rendered.append(img)
 
-        conf = float(y_scores[i][int(y_pred[i])])
         last_frame_path = seq_imgs[-1]
         record, drive, frame_name = _extract_record_drive_frame(last_frame_path)
-        header = "idx={} true={} pred={} conf={:.3f} {} {} {}".format(
-            int(i), int(y_true[i]), int(y_pred[i]), conf, record, drive, frame_name
-        )
+        if (y_pred is None) or (y_scores is None):
+            conf = None
+            pred_token = "NA"
+            header = "idx={} true={} pred={} conf={} crop={} {} {} {}".format(
+                int(i), int(y_true[i]), pred_token, "NA", crop_type, record, drive, frame_name
+            )
+        else:
+            conf = float(y_scores[i][int(y_pred[i])])
+            pred_token = str(int(y_pred[i]))
+            header = "idx={} true={} pred={} conf={:.3f} crop={} {} {} {}".format(
+                int(i), int(y_true[i]), int(y_pred[i]), conf, crop_type, record, drive, frame_name
+            )
         mosaic = _mosaic_grid(rendered, rows=3, cols=3, tile_size=360)
         mosaic = _draw_label(mosaic, header)
 
-        out_path = os.path.join(out_dir, "test_sample_{:03d}_idx{:05d}_{}_{}_{}_t{}_p{}_c{:.3f}.jpg".format(
-            int(out_i), int(i), record, drive, os.path.splitext(frame_name)[0], int(y_true[i]), int(y_pred[i]), conf
-        ))
+        if conf is None:
+            out_name = "test_sample_{:03d}_idx{:05d}_{}_{}_{}_t{}_p{}.jpg".format(
+                int(out_i), int(i), record, drive, os.path.splitext(frame_name)[0], int(y_true[i]), pred_token
+            )
+        else:
+            out_name = "test_sample_{:03d}_idx{:05d}_{}_{}_{}_t{}_p{}_c{:.3f}.jpg".format(
+                int(out_i), int(i), record, drive, os.path.splitext(frame_name)[0], int(y_true[i]), pred_token, conf
+            )
+        out_path = os.path.join(out_dir, out_name)
         cv2.imwrite(out_path, mosaic)
         print("  saved:", out_path)
-        print("    metadata: idx={} record={} drive={} frame={}".format(int(i), record, drive, frame_name))
+        print("    metadata: idx={} crop={} record={} drive={} frame={}".format(
+            int(i), crop_type, record, drive, frame_name
+        ))
 
 
 def run(config_path, auxiliary_loss, test, resume):
@@ -327,6 +419,30 @@ def run(config_path, auxiliary_loss, test, resume):
         else:
             tamformer.load_weights(load_path, by_name=False, skip_mismatch=False)
     if not test:
+        if bool(configs['model_opts'].get('visual_sample_before_training', False)):
+            preview_count = int(configs['model_opts'].get('visual_sample_count', 0))
+            if preview_count > 0:
+                preview_frames = int(configs['model_opts'].get('visual_sample_frames', 9))
+                preview_out_dir = configs['model_opts'].get(
+                    'visual_sample_out_dir',
+                    os.path.join(configs['model_opts'].get('model_path', './models'), 'visual_samples'),
+                )
+                preview_crop_type = configs['model_opts'].get('visual_sample_crop_type', 'auto')
+                if preview_crop_type == 'auto':
+                    preview_crop_type = _resolve_visual_crop_type(configs['model_opts'].get('obs_input_type', []))
+                preview_enlarge_ratio = float(configs['model_opts'].get('enlarge_ratio', 1.5))
+                print("\nCreating visual input preview before training...")
+                _save_visual_inference_samples(
+                    data_raw_test,
+                    np.asarray(test_data['data'][1]).astype(int),
+                    y_pred=None,
+                    y_scores=None,
+                    out_dir=preview_out_dir,
+                    sample_count=preview_count,
+                    num_frames=preview_frames,
+                    crop_type=preview_crop_type,
+                    enlarge_ratio=preview_enlarge_ratio,
+                )
         class_w = class_weights(configs['model_opts']['apply_class_weights'],
                                      data_train['count'],
                                      configs['model_opts'])
@@ -385,6 +501,10 @@ def run(config_path, auxiliary_loss, test, resume):
             'visual_sample_out_dir',
             os.path.join(configs['model_opts'].get('model_path', './models'), 'visual_samples'),
         )
+        visual_crop_type = configs['model_opts'].get('visual_sample_crop_type', 'auto')
+        if visual_crop_type == 'auto':
+            visual_crop_type = _resolve_visual_crop_type(configs['model_opts'].get('obs_input_type', []))
+        visual_enlarge_ratio = float(configs['model_opts'].get('enlarge_ratio', 1.5))
         _save_visual_inference_samples(
             data_raw_test,
             y_true,
@@ -393,6 +513,8 @@ def run(config_path, auxiliary_loss, test, resume):
             out_dir=visual_out_dir,
             sample_count=visual_sample_count,
             num_frames=visual_frames,
+            crop_type=visual_crop_type,
+            enlarge_ratio=visual_enlarge_ratio,
         )
 
 def class_weights(apply_weights, sample_count, model_opts):
