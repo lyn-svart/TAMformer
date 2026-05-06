@@ -20,7 +20,7 @@ model_opts:
   #   (val/test stay live to reduce disk growth).
   # - visual_cache_pooled: true stores pooled vectors instead of full feature maps
   #   (dramatically less disk and faster cache reads).
-  visual_disk_cache: false
+  visual_disk_cache: true
   visual_disk_cache_train_only: false
   visual_cache_pooled: true
   obs_seconds: 1
@@ -40,8 +40,14 @@ model_opts:
   feat_size: [4, 1, 512]
   num_classes: 21
   class_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+  sample_inference_count: 5
+  # Save a few visual inference grids after testing (bbox + true/pred/conf).
+  # Set to 0 to disable.
+  visual_sample_count: 3
+  visual_sample_frames: 9
+  visual_sample_out_dir: ./models/visual_samples
 data_opts:
-  fstride: 1
+  fstride: 5
   sample_type: all
   subset: default
   data_split_type: default

@@ -78,6 +78,121 @@ def _auto_configure_feat_size(model_opts):
     print("Auto feat_size:", feat_size, "(backbone={})".format(backbone))
 
 
+def _print_sample_inferences(y_true, y_pred, y_scores, sample_count=5):
+    """Print a few sample inferences from the test split."""
+    if sample_count <= 0:
+        return
+    total = len(y_true)
+    if total == 0:
+        print("No test samples available for sample inference preview.")
+        return
+
+    sample_count = min(int(sample_count), total)
+    print("\nSample inferences ({} of {}):".format(sample_count, total))
+    for i in range(sample_count):
+        pred_class = int(y_pred[i])
+        true_class = int(y_true[i])
+        confidence = float(y_scores[i][pred_class])
+        print(
+            "  [{}] true={} pred={} conf={:.4f}".format(
+                i, true_class, pred_class, confidence
+            )
+        )
+
+
+def _safe_imread(path):
+    try:
+        return cv2.imread(str(path))
+    except Exception:
+        return None
+
+
+def _draw_label(img_bgr, text):
+    if img_bgr is None:
+        return None
+    img = img_bgr
+    cv2.rectangle(img, (0, 0), (img.shape[1], 30), (0, 0, 0), -1)
+    cv2.putText(img, text, (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 0), 2, cv2.LINE_AA)
+    return img
+
+
+def _mosaic_grid(images_bgr, rows=3, cols=3, tile_size=360):
+    total = rows * cols
+    tiles = []
+    for i in range(total):
+        if i < len(images_bgr) and images_bgr[i] is not None:
+            tile = images_bgr[i]
+            tile = cv2.resize(tile, (tile_size, tile_size), interpolation=cv2.INTER_AREA)
+        else:
+            tile = np.zeros((tile_size, tile_size, 3), dtype=np.uint8)
+        tiles.append(tile)
+    grid_rows = []
+    for r in range(rows):
+        grid_rows.append(np.hstack(tiles[r * cols:(r + 1) * cols]))
+    return np.vstack(grid_rows)
+
+
+def _save_visual_inference_samples(data_raw, y_true, y_pred, y_scores, out_dir, sample_count=3, num_frames=9):
+    """
+    Save visual grids for a few test samples.
+
+    Expects data_raw to contain:
+      - image: list of sequences, each a list of frame paths
+      - bbox:  list of sequences, each a list of [x1,y1,x2,y2] (pixel coords)
+    """
+    if sample_count <= 0:
+        return
+    if not data_raw or 'image' not in data_raw or 'bbox' not in data_raw:
+        print("Visual samples skipped: raw image/bbox sequences not available.")
+        return
+
+    os.makedirs(out_dir, exist_ok=True)
+    n = min(len(y_true), len(data_raw['image']), len(data_raw['bbox']))
+    if n <= 0:
+        print("Visual samples skipped: no test samples available.")
+        return
+
+    sample_count = min(int(sample_count), n)
+    num_frames = max(1, min(int(num_frames), 9))
+
+    print("\nSaving visual inference samples to:", out_dir)
+    for i in range(sample_count):
+        seq_imgs = data_raw['image'][i]
+        seq_boxes = data_raw['bbox'][i]
+        if not seq_imgs:
+            continue
+
+        k = min(num_frames, len(seq_imgs))
+        frames = list(zip(seq_imgs[-k:], seq_boxes[-k:]))
+        rendered = []
+        for frame_path, box in frames:
+            img = _safe_imread(frame_path)
+            if img is None:
+                rendered.append(None)
+                continue
+            try:
+                x1, y1, x2, y2 = [int(round(float(v))) for v in box[0:4]]
+                x1 = max(0, min(x1, img.shape[1] - 1))
+                x2 = max(0, min(x2, img.shape[1] - 1))
+                y1 = max(0, min(y1, img.shape[0] - 1))
+                y2 = max(0, min(y2, img.shape[0] - 1))
+                cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            except Exception:
+                pass
+            rendered.append(img)
+
+        conf = float(y_scores[i][int(y_pred[i])])
+        header = "sample={} true={} pred={} conf={:.3f}".format(int(i), int(y_true[i]), int(y_pred[i]), conf)
+        mosaic = _mosaic_grid(rendered, rows=3, cols=3, tile_size=360)
+        mosaic = _draw_label(mosaic, header)
+
+        out_path = os.path.join(out_dir, "test_sample_{:03d}_t{}_p{}_c{:.3f}.jpg".format(
+            int(i), int(y_true[i]), int(y_pred[i]), conf
+        ))
+        cv2.imwrite(out_path, mosaic)
+        print("  saved:", out_path)
+
+
 def run(config_path, auxiliary_loss, test, resume):
     with open(config_path, 'r') as f:
         configs = yaml.safe_load(f)
@@ -210,6 +325,25 @@ def run(config_path, auxiliary_loss, test, resume):
           '- f1_weighted:', f1_weighted,
           '- precision_macro:', precision_macro,
           '- recall_macro:', recall_macro)
+    sample_inference_count = configs['model_opts'].get('sample_inference_count', 5)
+    _print_sample_inferences(y_true, y_pred, test_results, sample_inference_count)
+
+    visual_sample_count = int(configs['model_opts'].get('visual_sample_count', 0))
+    if visual_sample_count > 0:
+        visual_frames = int(configs['model_opts'].get('visual_sample_frames', 9))
+        visual_out_dir = configs['model_opts'].get(
+            'visual_sample_out_dir',
+            os.path.join(configs['model_opts'].get('model_path', './models'), 'visual_samples'),
+        )
+        _save_visual_inference_samples(
+            data_raw_test,
+            y_true,
+            y_pred,
+            test_results,
+            out_dir=visual_out_dir,
+            sample_count=visual_sample_count,
+            num_frames=visual_frames,
+        )
 
 def class_weights(apply_weights, sample_count, model_opts):
     if not apply_weights:

@@ -28,6 +28,10 @@ model_opts:
   feat_size: [4, 512]
   num_classes: 5
   class_weights: [1.0, 1.0, 1.0, 1.0, 1.0]
+  sample_inference_count: 5
+  visual_sample_count: 0
+  visual_sample_frames: 9
+  visual_sample_out_dir: ./models/visual_samples
 data_opts:
   fstride: 1
   sample_type: all  # all or beh only when model_opts/dataset is set to jaad
