@@ -132,6 +132,45 @@ def _mosaic_grid(images_bgr, rows=3, cols=3, tile_size=360):
     return np.vstack(grid_rows)
 
 
+def _sample_diverse_indices(total, count):
+    """Pick evenly spread indices across the full test set."""
+    if total <= 0 or count <= 0:
+        return []
+    if count >= total:
+        return list(range(total))
+    # Evenly distribute picks from start to end (deterministic, diverse).
+    idxs = np.linspace(0, total - 1, num=count, dtype=int).tolist()
+    # Guard against rare duplicate indices from integer rounding.
+    deduped = []
+    seen = set()
+    for i in idxs:
+        if i not in seen:
+            deduped.append(i)
+            seen.add(i)
+    if len(deduped) < count:
+        for i in range(total):
+            if i not in seen:
+                deduped.append(i)
+                seen.add(i)
+            if len(deduped) >= count:
+                break
+    return deduped[:count]
+
+
+def _extract_record_drive_frame(frame_path):
+    norm = str(frame_path).replace("\\", "/")
+    parts = [p for p in norm.split("/") if p]
+    frame_name = os.path.basename(norm)
+    record = "UNKNOWN_RECORD"
+    drive = "UNKNOWN_DRIVE"
+    for p in parts:
+        if p.startswith("RECORD"):
+            record = p
+        if p.startswith("DRIVE"):
+            drive = p
+    return record, drive, frame_name
+
+
 def _save_visual_inference_samples(data_raw, y_true, y_pred, y_scores, out_dir, sample_count=3, num_frames=9):
     """
     Save visual grids for a few test samples.
@@ -155,8 +194,10 @@ def _save_visual_inference_samples(data_raw, y_true, y_pred, y_scores, out_dir, 
     sample_count = min(int(sample_count), n)
     num_frames = max(1, min(int(num_frames), 9))
 
+    sample_indices = _sample_diverse_indices(n, sample_count)
     print("\nSaving visual inference samples to:", out_dir)
-    for i in range(sample_count):
+    print("Diverse sample indices:", sample_indices)
+    for out_i, i in enumerate(sample_indices):
         seq_imgs = data_raw['image'][i]
         seq_boxes = data_raw['bbox'][i]
         if not seq_imgs:
@@ -179,18 +220,27 @@ def _save_visual_inference_samples(data_raw, y_true, y_pred, y_scores, out_dir, 
                 cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
             except Exception:
                 pass
+            record, drive, frame_name = _extract_record_drive_frame(frame_path)
+            tile_label = "{}/{}/{}".format(record, drive, frame_name)
+            cv2.putText(img, tile_label, (8, max(20, img.shape[0] - 10)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1, cv2.LINE_AA)
             rendered.append(img)
 
         conf = float(y_scores[i][int(y_pred[i])])
-        header = "sample={} true={} pred={} conf={:.3f}".format(int(i), int(y_true[i]), int(y_pred[i]), conf)
+        last_frame_path = seq_imgs[-1]
+        record, drive, frame_name = _extract_record_drive_frame(last_frame_path)
+        header = "idx={} true={} pred={} conf={:.3f} {} {} {}".format(
+            int(i), int(y_true[i]), int(y_pred[i]), conf, record, drive, frame_name
+        )
         mosaic = _mosaic_grid(rendered, rows=3, cols=3, tile_size=360)
         mosaic = _draw_label(mosaic, header)
 
-        out_path = os.path.join(out_dir, "test_sample_{:03d}_t{}_p{}_c{:.3f}.jpg".format(
-            int(i), int(y_true[i]), int(y_pred[i]), conf
+        out_path = os.path.join(out_dir, "test_sample_{:03d}_idx{:05d}_{}_{}_{}_t{}_p{}_c{:.3f}.jpg".format(
+            int(out_i), int(i), record, drive, os.path.splitext(frame_name)[0], int(y_true[i]), int(y_pred[i]), conf
         ))
         cv2.imwrite(out_path, mosaic)
         print("  saved:", out_path)
+        print("    metadata: idx={} record={} drive={} frame={}".format(int(i), record, drive, frame_name))
 
 
 def run(config_path, auxiliary_loss, test, resume):
