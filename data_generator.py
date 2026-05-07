@@ -416,13 +416,13 @@ class DataGenerator(Sequence):
     def _normalize_box(self, X, label=False):
         new_X = X.copy()
         if label:
-            new_X[:, 1] = new_X[:, 1]/1080.0
-            new_X[:, 3] = new_X[:, 3]/1080.0
+            new_X[:, 1] = new_X[:, 1]/736.0
+            new_X[:, 3] = new_X[:, 3]/736.0
             new_X[:, 0] = new_X[:, 0]/1920.0
             new_X[:, 2] = new_X[:, 2]/1920.0
         else:
-            new_X[:, :, 1] = new_X[:, :, 1]/1080.0
-            new_X[:, :, 3] = new_X[:, :, 3]/1080.0
+            new_X[:, :, 1] = new_X[:, :, 1]/736.0
+            new_X[:, :, 3] = new_X[:, :, 3]/736.0
             new_X[:, :, 0] = new_X[:, :, 0]/1920.0
             new_X[:, :, 2] = new_X[:, :, 2]/1920.0
         return new_X
@@ -887,37 +887,87 @@ class DataGetter(object):
         if not disk_cache and not self._generator:
             raise ValueError(
                 'visual_disk_cache=False is only supported when model_opts["generator"] is True.')
+        
         preprocess_dict = {'vgg16': vgg16.preprocess_input, 'resnet50': resnet50.preprocess_input, 'mobilenet': mobilenet.preprocess_input}
         backbone_dict = {'vgg16': vgg16.VGG16, 'resnet50': resnet50.ResNet50, 'mobilenet': mobilenet.MobileNet}
         preprocess_input = preprocess_dict.get(self._backbone, None)
         print("Preprocessing Model:", self._backbone)
+        
         if process:
             assert (self._backbone in ['vgg16', 'resnet50', 'mobilenet']), "{} is not supported".format(self._backbone)
 
         skip_convnet_init = self._generator and not disk_cache
         cache_pooled_visual = bool(self.model_opts.get('visual_cache_pooled', False))
+        
         if skip_convnet_init:
             print("visual_disk_cache=False with generator=True: no disk cache and no upfront CNN pass.")
-            print("Visual features will be computed on-the-fly each batch (slower epochs, zero feature-cache storage).")
+            print("Visual features will be computed on-the-fly each batch.")
             convnet = None
         else:
             print("Backbone Models Loaded ......")
-            print("Initializing Preprocessin Model.......")
+            print("Initializing Preprocessing Model.......")
             convnet = backbone_dict[self._backbone](input_shape=(224, 224, 3), include_top=False, weights="imagenet")
             print("Preprocessing Model Initialized........")
 
-        sequences = []
+        # Pre-allocate sequences to maintain order while batching
+        sequences = [[] for _ in range(len(img_sequences))]
         bbox_seq = bbox_sequences.copy()
-        i = -1
-        for seq, pid in zip(img_sequences, ped_ids):
-            i += 1
+
+        # --- NEW BATCHING MECHANISM ---
+        batch_size_cnn = 256  # Optimal for modern GPUs
+        batch_imgs = []
+        batch_paths = []
+        batch_indices = []
+
+        def flush_cnn_batch():
+            """Runs predictions on accumulated images and saves them to disk."""
+            if not batch_imgs:
+                return
+            
+            # Predict the whole batch at once
+            batch_arr = np.array(batch_imgs)
+            preds = convnet.predict(batch_arr, batch_size=len(batch_imgs), verbose=0)
+            
+            # Process and save each prediction
+            for idx, pred in enumerate(preds):
+                s_idx, f_idx = batch_indices[idx]
+                img_save_path = batch_paths[idx]
+                
+                cache_obj = pred
+                if process and cache_pooled_visual:
+                    cache_obj = self._pool_cnn_output(pred)
+                
+                img_save_folder = os.path.dirname(img_save_path)
+                os.makedirs(img_save_folder, exist_ok=True)
+                with open(img_save_path, 'wb') as fid:
+                    pickle.dump(cache_obj, fid, pickle.HIGHEST_PROTOCOL)
+                
+                # Append to sequence array
+                if self._generator:
+                    sequences[s_idx].append(img_save_path)
+                else:
+                    feat_to_store = pred
+                    if self._global_pooling == 'max':
+                        feat_to_store = np.amax(np.amax(feat_to_store, axis=0), axis=0)
+                    elif self._global_pooling == 'avg':
+                        feat_to_store = np.average(np.average(feat_to_store, axis=0), axis=0)
+                    else:
+                        feat_to_store = feat_to_store.ravel()
+                    sequences[s_idx].append(feat_to_store)
+                    
+            # Clear buffers
+            batch_imgs.clear()
+            batch_paths.clear()
+            batch_indices.clear()
+        # ------------------------------
+
+        for i, (seq, pid) in enumerate(zip(img_sequences, ped_ids)):
             self.update_progress(i / len(img_sequences))
-            img_seq = []
+            
             fixed_context_window = bool(self.model_opts.get('context_fixed_window', False))
             fixed_context_anchor = str(self.model_opts.get('context_fixed_window_anchor', 'first')).lower()
             seq_bbox_used = list(bbox_seq[i])
-            # Optional: keep one context/surround crop window for the whole sequence.
-            # This preserves temporal scale cues (object getting bigger/smaller in-place).
+            
             if fixed_context_window and (('context' in crop_type) or ('surround' in crop_type)) and len(seq_bbox_used) > 0:
                 anchor_idx = 0 if fixed_context_anchor != 'last' else (len(seq_bbox_used) - 1)
                 anchor_imp = seq[anchor_idx]
@@ -928,9 +978,9 @@ class DataGetter(object):
                     anchor_ctx = np.asarray(anchor_ctx, dtype=np.float32)
                     seq_bbox_used = [anchor_ctx.copy() for _ in range(len(seq_bbox_used))]
                 except Exception:
-                    # Fallback to per-frame context behavior if anchor frame cannot be resolved.
                     pass
-            for imp, b, p in zip(seq, seq_bbox_used, pid):
+
+            for f_idx, (imp, b, p) in enumerate(zip(seq, seq_bbox_used, pid)):
                 flip_image = False
                 imp_norm = str(imp).replace('\\', '/')
 
@@ -941,12 +991,10 @@ class DataGetter(object):
                         flip_image = True
                     b_copy = np.asarray(b, dtype=np.float32).copy()
                     ts = int(target_dim[0]) if isinstance(target_dim, (list, tuple, np.ndarray)) else int(target_dim)
-                    img_seq.append(
-                        ('__LIVE_VISUAL__', imp_read, b_copy, crop_type, crop_resize_ratio,
-                         crop_mode, flip_image, ts))
+                    sequences[i].append(
+                        ('__LIVE_VISUAL__', imp_read, b_copy, crop_type, crop_resize_ratio, crop_mode, flip_image, ts))
                     continue
 
-                # Prefer RECORD/DRIVE ids when present in path; fallback to trailing folders.
                 rd_match = re.search(r'(RECORD[^/]+)/?(DRIVE[^/]+)?/frames/', imp_norm)
                 if rd_match:
                     set_id = rd_match.group(1)
@@ -955,10 +1003,10 @@ class DataGetter(object):
                     parts = imp_norm.split('/')
                     set_id = parts[-3] if len(parts) >= 3 else 'unknown_set'
                     vid_id = parts[-2] if len(parts) >= 2 else 'unknown_vid'
+                    
                 img_name = os.path.splitext(os.path.basename(imp_norm))[0]
                 img_save_folder = os.path.join(save_path, set_id, vid_id)
 
-                # Modify the path depending on crop mode
                 if crop_type == 'none':
                     img_save_path = os.path.join(img_save_folder, img_name + '.pkl')
                 else:
@@ -966,7 +1014,6 @@ class DataGetter(object):
                     pid_token = re.sub(r'[^A-Za-z0-9_.-]+', '_', pid_token)
                     img_save_path = os.path.join(img_save_folder, img_name + '_' + pid_token + '.pkl')
 
-                # Check whether the file exists
                 if os.path.exists(img_save_path) and not regen_data:
                     if not self._generator:
                         with open(img_save_path, 'rb') as fid:
@@ -974,22 +1021,27 @@ class DataGetter(object):
                                 img_features = pickle.load(fid)
                             except:
                                 img_features = pickle.load(fid, encoding='bytes')
+                        sequences[i].append(img_features)
+                    else:
+                        sequences[i].append(img_save_path)
                 else:
                     if 'flip' in imp:
                         imp = imp.replace('_flip', '')
                         flip_image = True
+                        
+                    img_data = cv2.imread(imp)
+                    if img_data is None:
+                        continue
+                        
+                    if flip_image:
+                        img_data = cv2.flip(img_data, 1)
+                        
                     if crop_type == 'none':
-                        img_data = cv2.imread(imp)
                         img_features = cv2.resize(img_data, target_dim)
-                        if flip_image:
-                            img_features = cv2.flip(img_features, 1)
                     else:
-                        img_data = cv2.imread(imp)
-                        if flip_image:
-                            img_data = cv2.flip(img_data, 1)
                         if crop_type == 'bbox':
-                            b = list(map(int, b[0:4]))
-                            cropped_image = img_data[b[1]:b[3], b[0]:b[2], :]
+                            b_int = list(map(int, b[0:4]))
+                            cropped_image = img_data[b_int[1]:b_int[3], b_int[0]:b_int[2], :]
                             img_features = self.img_pad(cropped_image, mode=crop_mode, size=target_dim[0])
                         elif 'context' in crop_type:
                             bbox = self.jitter_bbox(imp, [b], 'enlarge', crop_resize_ratio)[0]
@@ -1007,39 +1059,29 @@ class DataGetter(object):
                             img_features = self.img_pad(cropped_image, mode='pad_resize', size=target_dim[0])
                         else:
                             raise ValueError('ERROR: Undefined value for crop_type {}!'.format(crop_type))
+                            
                     if preprocess_input is not None:
                         img_features = preprocess_input(img_features)
+                        
                     if process:
-                        expanded_img = np.expand_dims(img_features, axis=0)
-                        img_features = convnet.predict(expanded_img, verbose=0)
-                    cache_obj = img_features
-                    if process and cache_pooled_visual:
-                        cache_obj = self._pool_cnn_output(img_features)
-                    # Save the file
-                    if not os.path.exists(img_save_folder):
-                        os.makedirs(img_save_folder, exist_ok=True)
-                    with open(img_save_path, 'wb') as fid:
-                        pickle.dump(cache_obj, fid, pickle.HIGHEST_PROTOCOL)
-
-                # if using the generator save the cached features path and size of the features
-                if process and not self._generator:
-                    if self._global_pooling == 'max':
-                        img_features = np.squeeze(img_features)
-                        img_features = np.amax(img_features, axis=0)
-                        img_features = np.amax(img_features, axis=0)
-                    elif self._global_pooling == 'avg':
-                        img_features = np.squeeze(img_features)
-                        img_features = np.average(img_features, axis=0)
-                        img_features = np.average(img_features, axis=0)
+                        batch_imgs.append(img_features)
+                        batch_paths.append(img_save_path)
+                        batch_indices.append((i, f_idx))
+                        
+                        # Trigger flush if batch is full
+                        if len(batch_imgs) >= batch_size_cnn:
+                            flush_cnn_batch()
                     else:
-                        img_features = img_features.ravel()
+                        if not os.path.exists(img_save_folder):
+                            os.makedirs(img_save_folder, exist_ok=True)
+                        with open(img_save_path, 'wb') as fid:
+                            pickle.dump(img_features, fid, pickle.HIGHEST_PROTOCOL)
+                        sequences[i].append(img_save_path if self._generator else img_features)
 
-                if self._generator:
-                    img_seq.append(img_save_path)
-                else:
-                    img_seq.append(img_features)
-            sequences.append(img_seq)
-        # Live specs are (path, bbox, ...) tuples; np.array() would try to stack them into a broken ndarray.
+        # Flush any remaining items in the buffer after all sequences are processed
+        if process:
+            flush_cnn_batch()
+
         if skip_convnet_init:
             nseq = len(sequences)
             seq_obj = np.empty((nseq,), dtype=object)
@@ -1047,8 +1089,9 @@ class DataGetter(object):
                 seq_obj[_si] = sequences[_si]
             sequences = seq_obj
         else:
-            sequences = np.array(sequences)
-        # compute size of the features after the processing
+            # Ensure uniform list wrapping before converting to array if necessary
+            pass
+            
         if self._generator:
             if skip_convnet_init:
                 dim = self.spatial_backbone_vector_dim(self._backbone, self._global_pooling)
@@ -1065,6 +1108,7 @@ class DataGetter(object):
                     feat_shape = (feat_shape,)
                 feat_shape = (np.array(bbox_sequences).shape[1],) + feat_shape
         else:
+            sequences = np.array(sequences)
             feat_shape = sequences.shape[1:]
 
         return sequences, feat_shape

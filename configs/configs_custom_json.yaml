@@ -3,9 +3,9 @@ model_opts:
   backbone: vgg16
   obs_input_type: [box, local_context]
   enlarge_ratio: 1.5
-  obs_length: 16
+  obs_length: 10
   time_to_event: 30
-  min_encoding_len: 16
+  min_encoding_len: 10
   balance_data: False
   apply_class_weights: True
   dataset: custom_json
@@ -31,7 +31,7 @@ model_opts:
   batch_size: 64
   val_batch_size: 64
   dropout: 0.1
-  interval: 30
+  interval: 10
   classifier_activation: softmax
   classifier_loss: sparse_categorical_crossentropy
   epochs: 20
@@ -39,7 +39,7 @@ model_opts:
   lr: 0.00001
   model_path: ./models
   step: 3
-  seq_len: 16
+  seq_len: 10
   # Ignored when auto_feat_size=true. Kept for readability/defaults.
   feat_size: [4, 1, 512]
   num_classes: 21
@@ -57,12 +57,12 @@ model_opts:
   # If true, save visual samples immediately before training starts (pred/conf shown as NA).
   visual_sample_before_training: true
 data_opts:
-  fstride: 5
+  fstride: 20
   sample_type: all
   subset: default
   data_split_type: default
   seq_type: crossing
-  min_track_size: 16
+  min_track_size: 10
   # Preferred split-aware paths for custom_json:
   path_to_json_train: /home/bkaradurak/Projects/ObjectMotionDetection/02-Source/PreventionData/Train.json
   path_to_json_val: /home/bkaradurak/Projects/ObjectMotionDetection/02-Source/PreventionData/Validation.json
