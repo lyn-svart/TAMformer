@@ -64,9 +64,9 @@ data_opts:
   seq_type: crossing
   min_track_size: 16
   # Preferred split-aware paths for custom_json:
-  path_to_json_train: /home/bkaradurak/Projects/ObjectMotionDetection/01-Code/prevention-data-check/splits/train.json
-  path_to_json_val: /home/bkaradurak/Projects/ObjectMotionDetection/01-Code/prevention-data-check/splits/val.json
-  path_to_json_test: /home/bkaradurak/Projects/ObjectMotionDetection/01-Code/prevention-data-check/splits/test.json
+  path_to_json_train: /home/bkaradurak/Projects/ObjectMotionDetection/02-Source/PreventionData/Train.json
+  path_to_json_val: /home/bkaradurak/Projects/ObjectMotionDetection/02-Source/PreventionData/Validation.json
+  path_to_json_test: /home/bkaradurak/Projects/ObjectMotionDetection/02-Source/PreventionData/Test.json
   path_to_frames_root: /home/bkaradurak/Projects/ObjectMotionDetection/02-Source/PreventionData
   # Legacy single-file mode (train=val=test) if split paths are not provided:
   path_to_json: /home/bkaradurak/Projects/ObjectMotionDetection/01-Code/prevention-data-check/Train.json

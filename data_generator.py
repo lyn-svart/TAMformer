@@ -247,6 +247,7 @@ class DataGenerator(Sequence):
         self.indices = None
         self.on_epoch_end()
         self.opts = opts
+        self._warned_bad_cache_paths = set()
 
     def get_size(self):
         return len(self.data[0])
@@ -266,16 +267,54 @@ class DataGenerator(Sequence):
         # Keras 3 data adapter expects tuple/dict tree (not raw Python list).
         return tuple(X), y
 
-    def _get_img_features(self, cached_path):
-        with open(cached_path, 'rb') as fid:
-            try:
-                img_features = pickle.load(fid)
-            except:
-                img_features = pickle.load(fid, encoding='bytes')
+    def _warn_bad_cache(self, cached_path, reason):
+        if cached_path in self._warned_bad_cache_paths:
+            return
+        print("WARNING: bad feature cache at {} ({})".format(cached_path, reason))
+        self._warned_bad_cache_paths.add(cached_path)
+
+    @staticmethod
+    def _fit_feature_shape(arr, expected_shape):
+        if expected_shape is None:
+            return np.asarray(arr, dtype=np.float32)
+        expected_shape = tuple(int(s) for s in expected_shape)
+        expected_size = int(np.prod(expected_shape))
+        flat = np.asarray(arr, dtype=np.float32).ravel()
+        if flat.size < expected_size:
+            padded = np.zeros((expected_size,), dtype=np.float32)
+            padded[:flat.size] = flat
+            flat = padded
+        elif flat.size > expected_size:
+            flat = flat[:expected_size]
+        return flat.reshape(expected_shape)
+
+    def _bad_cache_fallback(self, cached_path, expected_shape, reason):
+        self._warn_bad_cache(cached_path, reason)
+        try:
+            if os.path.isfile(cached_path):
+                os.remove(cached_path)
+        except OSError:
+            pass
+        if expected_shape is None:
+            return np.zeros((1,), dtype=np.float32)
+        return np.zeros(tuple(int(s) for s in expected_shape), dtype=np.float32)
+
+    def _get_img_features(self, cached_path, expected_shape=None):
+        if (not os.path.isfile(cached_path)) or os.path.getsize(cached_path) == 0:
+            return self._bad_cache_fallback(cached_path, expected_shape, 'missing/empty cache file')
+        try:
+            with open(cached_path, 'rb') as fid:
+                try:
+                    img_features = pickle.load(fid)
+                except (UnicodeDecodeError, TypeError):
+                    fid.seek(0)
+                    img_features = pickle.load(fid, encoding='bytes')
+        except (EOFError, pickle.UnpicklingError, ValueError, AttributeError) as exc:
+            return self._bad_cache_fallback(cached_path, expected_shape, str(exc))
         img_features = np.asarray(img_features)
         # If cache already stores pooled vectors, return directly.
         if img_features.ndim <= 1:
-            return np.asarray(img_features, dtype=np.float32)
+            return self._fit_feature_shape(img_features, expected_shape)
         if self.process:
             if self.global_pooling == 'max':
                 img_features = np.squeeze(img_features)
@@ -287,7 +326,7 @@ class DataGenerator(Sequence):
                 img_features = np.average(img_features, axis=0)
             else:
                 img_features = img_features.ravel()
-        return img_features
+        return self._fit_feature_shape(img_features, expected_shape)
 
     def _pool_cnn_output(self, img_features):
         arr = np.asarray(img_features)
@@ -413,7 +452,11 @@ class DataGenerator(Sequence):
                 elif isinstance(cell0, str):
                     cached_path_list = self.data[input_type_idx][index]
                     for j, cached_path in enumerate(cached_path_list):
-                        img_features = self._get_img_features(cached_path)
+                        if len(cached_path_list) == 1:
+                            expected_shape = features_batch[i, ].shape
+                        else:
+                            expected_shape = features_batch[i, j, ].shape
+                        img_features = self._get_img_features(cached_path, expected_shape=expected_shape)
 
                         if len(cached_path_list) == 1:
                             features_batch[i, ] = img_features
