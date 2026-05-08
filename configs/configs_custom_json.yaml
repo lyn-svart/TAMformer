@@ -53,7 +53,7 @@ model_opts:
   # If true, save visual samples immediately before training starts (pred/conf shown as NA).
   visual_sample_before_training: true
 data_opts:
-  fstride: 20
+  fstride: 1
   sample_type: all
   subset: default
   data_split_type: default
