@@ -58,13 +58,6 @@ This file explains the meaning of each key in `configs/configs_custom_json.yaml`
 - `enlarge_ratio`
   - Enlargement factor for `local_context` / `surround` crop generation.
 
-- `context_fixed_window`
-  - If `true`, context/surround uses one anchor crop window for the entire track.
-  - This helps preserve temporal size-change cues (approach/leave behavior).
-
-- `context_fixed_window_anchor`
-  - Anchor frame for fixed window: `first` or `last`.
-
 - `normalize_boxes`
   - Exists for compatibility; current custom_json flow does not heavily branch on it.
 
@@ -204,7 +197,7 @@ This file explains the meaning of each key in `configs/configs_custom_json.yaml`
 
 ## Notes and recommendations
 
-- If you changed crop behavior (e.g., `context_fixed_window`, `enlarge_ratio`) and use disk cache, clear relevant cached features before strict comparison experiments.
+- If you changed crop behavior (e.g., `enlarge_ratio`) and use disk cache, clear relevant cached features before strict comparison experiments.
 - For fast debug runs:
   - keep `visual_cache_pooled: true`
   - reduce `epochs`

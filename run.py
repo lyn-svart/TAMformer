@@ -312,9 +312,7 @@ def _save_visual_inference_samples(
         crop_type='bbox',
         enlarge_ratio=1.5,
         target_dim=(224, 224),
-        draw_header=False,
-        fixed_context_window=False,
-        fixed_context_window_anchor='first'):
+        draw_header=False):
     """
     Save visual grids for a few test samples.
 
@@ -345,13 +343,9 @@ def _save_visual_inference_samples(
         seq_boxes = data_raw['bbox'][i]
         if not seq_imgs:
             continue
-        seq_boxes_used = list(seq_boxes)
-        if fixed_context_window and (crop_type in ['context', 'surround']) and len(seq_boxes) > 0:
-            anchor_idx = 0 if str(fixed_context_window_anchor).lower() != 'last' else (len(seq_boxes) - 1)
-            seq_boxes_used = [seq_boxes[anchor_idx] for _ in range(len(seq_boxes))]
 
         k = min(num_frames, len(seq_imgs))
-        frames = list(zip(seq_imgs[-k:], seq_boxes_used[-k:]))
+        frames = list(zip(seq_imgs[-k:], seq_boxes[-k:]))
         rendered = []
         for frame_path, box in frames:
             img = _safe_imread(frame_path)
@@ -499,8 +493,6 @@ def run(config_path, auxiliary_loss, test, resume):
                 preview_enlarge_ratio = float(configs['model_opts'].get('enlarge_ratio', 1.5))
                 preview_target_dim = configs['model_opts'].get('target_dim', (224, 224))
                 preview_draw_header = bool(configs['model_opts'].get('visual_sample_draw_header', False))
-                preview_fixed_context = bool(configs['model_opts'].get('context_fixed_window', False))
-                preview_fixed_context_anchor = str(configs['model_opts'].get('context_fixed_window_anchor', 'first'))
                 print("\nCreating visual input preview before training...")
                 _save_visual_inference_samples(
                     data_raw_test,
@@ -514,8 +506,6 @@ def run(config_path, auxiliary_loss, test, resume):
                     enlarge_ratio=preview_enlarge_ratio,
                     target_dim=preview_target_dim,
                     draw_header=preview_draw_header,
-                    fixed_context_window=preview_fixed_context,
-                    fixed_context_window_anchor=preview_fixed_context_anchor,
                 )
         class_w = class_weights(configs['model_opts']['apply_class_weights'],
                                      data_train['count'],
@@ -582,8 +572,6 @@ def run(config_path, auxiliary_loss, test, resume):
         visual_enlarge_ratio = float(configs['model_opts'].get('enlarge_ratio', 1.5))
         visual_target_dim = configs['model_opts'].get('target_dim', (224, 224))
         visual_draw_header = bool(configs['model_opts'].get('visual_sample_draw_header', False))
-        visual_fixed_context = bool(configs['model_opts'].get('context_fixed_window', False))
-        visual_fixed_context_anchor = str(configs['model_opts'].get('context_fixed_window_anchor', 'first'))
         _save_visual_inference_samples(
             data_raw_test,
             y_true,
@@ -596,8 +584,6 @@ def run(config_path, auxiliary_loss, test, resume):
             enlarge_ratio=visual_enlarge_ratio,
             target_dim=visual_target_dim,
             draw_header=visual_draw_header,
-            fixed_context_window=visual_fixed_context,
-            fixed_context_window_anchor=visual_fixed_context_anchor,
         )
 
 def class_weights(apply_weights, sample_count, model_opts):

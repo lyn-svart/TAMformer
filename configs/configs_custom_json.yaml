@@ -23,10 +23,6 @@ model_opts:
   visual_disk_cache: true
   visual_disk_cache_train_only: false
   visual_cache_pooled: true
-  # Keep one context window for the full track to preserve temporal size change cues.
-  context_fixed_window: true
-  # first or last
-  context_fixed_window_anchor: first
   obs_seconds: 1
   batch_size: 64
   val_batch_size: 64
