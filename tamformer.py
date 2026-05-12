@@ -144,9 +144,14 @@ class TAMformer(object):
         x4 = Dropout(0.1)(x3)
         x5 = Dense(32, activation='relu')(x4)
         x6 = Dropout(0.1)(x5)
-        outputs = Dense(num_classes, activation='softmax', name='output')(x6)
-
-        model = Model(inputs, outputs, name='tamformer')
+        if self.model_opts.get('predict_location'):
+            num_location = int(self.model_opts.get('num_location_classes', 3))
+            motion_out = Dense(num_classes, activation='softmax', name='motion')(x6)
+            location_out = Dense(num_location, activation='softmax', name='location')(x6)
+            model = Model(inputs, [motion_out, location_out], name='tamformer')
+        else:
+            outputs = Dense(num_classes, activation='softmax', name='output')(x6)
+            model = Model(inputs, outputs, name='tamformer')
 
         if self.auxiliary_loss:
             cross0 = Lambda(lambda s: s[:, 0])(cross_transformer_block)

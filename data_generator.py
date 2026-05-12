@@ -43,6 +43,13 @@ class TrackJSONAdapter(object):
         'intent to cross': 20,
     }
 
+    # Per-object JSON field `location` (case-insensitive). Unknown/missing -> center (1).
+    LOCATION_TO_CLASS = {
+        'left': 0,
+        'center': 1,
+        'right': 2,
+    }
+
     def __init__(self, json_path, chunk_dt=10, frames_root=None):
         """chunk_dt: if set, emit sliding windows of length chunk_dt+1 (frames i..i+chunk_dt).
         If None, emit one sample per full track (previous behavior)."""
@@ -118,6 +125,15 @@ class TrackJSONAdapter(object):
             return self.MOTION_TO_CLASS[motion_key]
         return 3
 
+    def _location_to_class(self, raw):
+        default = self.LOCATION_TO_CLASS['center']
+        if raw is None:
+            return default
+        key = str(raw).strip().lower()
+        if key in self.LOCATION_TO_CLASS:
+            return self.LOCATION_TO_CLASS[key]
+        return default
+
     def load(self):
         with open(self.json_path, 'r', encoding='utf-8') as f:
             frame_dict = json.load(f)
@@ -143,6 +159,7 @@ class TrackJSONAdapter(object):
         box_seq = []
         center_seq = []
         activities = []
+        location_activities = []
         obds_seq = []
         image_dims = []
 
@@ -156,6 +173,7 @@ class TrackJSONAdapter(object):
             seq_boxes = []
             seq_centers = []
             seq_acts = []
+            seq_locs = []
             seq_speed = []
             seq_dims = []
 
@@ -169,6 +187,7 @@ class TrackJSONAdapter(object):
                 cy = (bbox[1] + bbox[3]) / 2.0
 
                 class_id = self._motion_to_class(obj.get('motion', 'stopped'))
+                loc_id = self._location_to_class(obj.get('location', None))
                 vx = self._safe_float(obj.get('Vx', 0.0))
                 vz = self._safe_float(obj.get('Vz', 0.0))
                 speed = float(np.sqrt(vx * vx + vz * vz))
@@ -178,6 +197,7 @@ class TrackJSONAdapter(object):
                 seq_boxes.append(bbox)
                 seq_centers.append([cx, cy])
                 seq_acts.append([class_id])
+                seq_locs.append([loc_id])
                 seq_speed.append([speed])
                 seq_dims.append((img_w, img_h))
 
@@ -187,6 +207,7 @@ class TrackJSONAdapter(object):
                 box_seq.append(seq_boxes)
                 center_seq.append(seq_centers)
                 activities.append(seq_acts)
+                location_activities.append(seq_locs)
                 obds_seq.append(seq_speed)
                 image_dims.append(seq_dims[-1])
             else:
@@ -201,6 +222,7 @@ class TrackJSONAdapter(object):
                     box_seq.append(seq_boxes[start:end])
                     center_seq.append(seq_centers[start:end])
                     activities.append(seq_acts[start:end])
+                    location_activities.append(seq_locs[start:end])
                     obds_seq.append(seq_speed[start:end])
                     image_dims.append(seq_dims[end - 1])
 
@@ -208,6 +230,8 @@ class TrackJSONAdapter(object):
         class_values = [seq[-1][0] for seq in activities if len(seq) > 0]
         class_count = dict(Counter(class_values))
         print("Class distribution (motion classes):", class_count)
+        loc_values = [seq[-1][0] for seq in location_activities if len(seq) > 0]
+        print("Class distribution (location classes):", dict(Counter(loc_values)))
 
         return {'image': image_seq,
                 'pid': pids_seq,
@@ -215,6 +239,7 @@ class TrackJSONAdapter(object):
                 'center': center_seq,
                 'obd_speed': obds_seq,
                 'activities': activities,
+                'location_activities': location_activities,
                 'image_dimension': image_dims}
 
 class DataGenerator(Sequence):
@@ -473,16 +498,24 @@ class DataGenerator(Sequence):
         return X
 
     def _generate_y(self, indices):
+        def _last_class_id(label_value):
+            if np.isscalar(label_value):
+                return int(label_value)
+            label_arr = np.asarray(label_value).reshape(-1)
+            return int(label_arr[-1]) if label_arr.size else 0
+
+        predict_location = bool(self.opts and self.opts.get('predict_location'))
+        if predict_location:
+            Y_m = np.empty((self.batch_size,), dtype=np.int32)
+            Y_l = np.empty((self.batch_size,), dtype=np.int32)
+            for i, index in enumerate(indices):
+                Y_m[i] = _last_class_id(self.labels[0][index])
+                Y_l[i] = _last_class_id(self.labels[1][index])
+            return {'motion': np.copy(Y_m), 'location': np.copy(Y_l)}
+
         Y = np.empty((self.batch_size,), dtype=np.int32)
         for i, index in enumerate(indices):
-            label_value = self.labels[0][index]
-            if np.isscalar(label_value):
-                Y[i, ] = int(label_value)
-            else:
-                # Support sequence-shaped labels (e.g., [obs_len, 1]) by using
-                # the last available timestep class.
-                label_arr = np.asarray(label_value).reshape(-1)
-                Y[i, ] = int(label_arr[-1]) if label_arr.size else 0
+            Y[i] = _last_class_id(self.labels[0][index])
         return np.copy(Y)
 
 
@@ -504,7 +537,7 @@ class DataGetter(object):
         data_type_sizes_dict = {}
         process = self.model_opts.get('process', True)
         dataset = self.model_opts['dataset']
-        data, class_count = self.get_data_sequence()
+        data, count_bundle = self.get_data_sequence()
 
         data_type_sizes_dict['box'] = data['box'].shape[1:]
         if 'speed' in data.keys():
@@ -541,8 +574,14 @@ class DataGetter(object):
         if self._generator:
             gen_opts = dict(self.model_opts)
             gen_opts['_live_visual_parent'] = self
+            if self.model_opts.get('predict_location'):
+                gen_labels = [data['crossing'], data['location']]
+                y_for_eval = {'motion': data['labels'], 'location': data['labels_location']}
+            else:
+                gen_labels = [data['crossing'], data['goals'], data['tte']]
+                y_for_eval = data['labels']
             _data = (DataGenerator(data=_data,
-                                   labels=[data['crossing'], data['goals'], data['tte']],
+                                   labels=gen_labels,
                                    data_sizes=data_sizes,
                                    process=process,
                                    global_pooling=self._global_pooling,
@@ -550,7 +589,7 @@ class DataGetter(object):
                                    batch_size=batch_size if (self.data_type=='train' or self.data_type=='val') else 1,
                                    shuffle=self.data_type != 'test',
                                    to_fit=self.data_type != 'test',
-                                   opts=gen_opts), data['labels'], data['lens'])
+                                   opts=gen_opts), y_for_eval, data['lens'])
         else:
             _data = (_data, data['crossing'])
 
@@ -558,7 +597,7 @@ class DataGetter(object):
                 'ped_id': data['ped_id'],
                 'image': data['image'],
                 'data_params': {'data_types': data_types, 'data_sizes': data_sizes},
-                'count': {'class_count': class_count}}
+                'count': count_bundle}
 
     def get_data_sequence(self):
         d = {'center': self.data_raw['center'].copy(),
@@ -580,6 +619,18 @@ class DataGetter(object):
             d['speed'] = self.data_raw['vehicle_act'].copy()
             print('Jaad dataset does not have speed information')
             print('Vehicle actions are used instead')
+
+        if self.model_opts.get('predict_location'):
+            if 'location_activities' in self.data_raw:
+                d['location'] = self.data_raw['location_activities'].copy()
+            else:
+                if not getattr(DataGetter, '_warned_location_fallback', False):
+                    print(
+                        'WARNING: predict_location=True but data has no location_activities; '
+                        'using center (class 1) for all timesteps.'
+                    )
+                    DataGetter._warned_location_fallback = True
+                d['location'] = [[[1]] * len(seq) for seq in d['crossing']]
 
         balance = self.model_opts['balance_data'] if self.data_type == 'train' else False
         if balance:
@@ -615,7 +666,14 @@ class DataGetter(object):
         d['labels'] = np.array(labels)
 
         class_count = dict(Counter(labels))
-        return d, class_count
+        count_bundle = {'class_count': class_count}
+        if self.model_opts.get('predict_location'):
+            labels_location = []
+            for l in d['location']:
+                labels_location.append(int(l[-1][0]))
+            d['labels_location'] = np.array(labels_location)
+            count_bundle['class_count_location'] = dict(Counter(labels_location))
+        return d, count_bundle
 
     def update_progress(self, progress):
         barLength = 20  # Modify this to change the length of the progress bar
@@ -662,7 +720,19 @@ class DataGetter(object):
                             flipped = d[k][i].copy()
                             flipped = [im.replace('.png', '_flip.png') for im in flipped]
                             d[k].append(flipped)
-                        if k in ['speed', 'ped_id', 'crossing', 'walking', 'looking']:
+                        if k == 'location':
+                            flipped_loc = []
+                            for step in d[k][i]:
+                                cid = int(step[0])
+                                if cid == 0:
+                                    nid = 2
+                                elif cid == 2:
+                                    nid = 0
+                                else:
+                                    nid = 1
+                                flipped_loc.append([nid])
+                            d[k].append(flipped_loc)
+                        elif k in ['speed', 'ped_id', 'crossing', 'walking', 'looking']:
                             d[k].append(d[k][i].copy())
 
             gt_labels = [gt[0] for gt in d[balance_tag]]

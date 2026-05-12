@@ -47,6 +47,14 @@ from tensorflow.keras.optimizers import Adam, SGD, RMSprop
 from tensorflow import keras
 
 
+def _class_id_to_name(class_id, inverse_map):
+    return inverse_map.get(int(class_id), str(int(class_id)))
+
+
+_MOTION_ID_TO_NAME = {v: k for k, v in TrackJSONAdapter.MOTION_TO_CLASS.items()}
+_LOC_ID_TO_NAME = {v: k for k, v in TrackJSONAdapter.LOCATION_TO_CLASS.items()}
+
+
 def _auto_configure_feat_size(model_opts):
     """Auto-derive feat_size from obs_input_type and backbone when enabled."""
     if not model_opts.get('auto_feat_size', False):
@@ -78,7 +86,8 @@ def _auto_configure_feat_size(model_opts):
     print("Auto feat_size:", feat_size, "(backbone={})".format(backbone))
 
 
-def _print_sample_inferences(y_true, y_pred, y_scores, sample_count=5):
+def _print_sample_inferences(y_true, y_pred, y_scores, sample_count=5,
+                             y_true_location=None, y_pred_location=None, y_scores_location=None):
     """Print a few sample inferences from the test split."""
     if sample_count <= 0:
         return
@@ -89,15 +98,32 @@ def _print_sample_inferences(y_true, y_pred, y_scores, sample_count=5):
 
     sample_count = min(int(sample_count), total)
     print("\nSample inferences ({} of {}):".format(sample_count, total))
+    dual = y_true_location is not None and y_pred_location is not None and y_scores_location is not None
     for i in range(sample_count):
         pred_class = int(y_pred[i])
         true_class = int(y_true[i])
         confidence = float(y_scores[i][pred_class])
-        print(
-            "  [{}] true={} pred={} conf={:.4f}".format(
-                i, true_class, pred_class, confidence
+        if dual:
+            pl = int(y_pred_location[i])
+            tl = int(y_true_location[i])
+            conf_l = float(y_scores_location[i][pl])
+            print(
+                "  [{}] motion true={} pred={} conf={:.4f} | location true={} pred={} conf={:.4f}".format(
+                    i,
+                    _class_id_to_name(true_class, _MOTION_ID_TO_NAME),
+                    _class_id_to_name(pred_class, _MOTION_ID_TO_NAME),
+                    confidence,
+                    _class_id_to_name(tl, _LOC_ID_TO_NAME),
+                    _class_id_to_name(pl, _LOC_ID_TO_NAME),
+                    conf_l,
+                )
             )
-        )
+        else:
+            print(
+                "  [{}] true={} pred={} conf={:.4f}".format(
+                    i, true_class, pred_class, confidence
+                )
+            )
 
 
 def _print_per_class_metrics(y_true, y_pred, y_scores, num_classes):
@@ -312,7 +338,10 @@ def _save_visual_inference_samples(
         crop_type='bbox',
         enlarge_ratio=1.5,
         target_dim=(224, 224),
-        draw_header=False):
+        draw_header=False,
+        y_true_location=None,
+        y_pred_location=None,
+        y_scores_location=None):
     """
     Save visual grids for a few test samples.
 
@@ -334,6 +363,7 @@ def _save_visual_inference_samples(
 
     sample_count = min(int(sample_count), n)
     num_frames = max(1, min(int(num_frames), 9))
+    dual = y_true_location is not None and len(y_true_location) >= n
 
     sample_indices = _sample_diverse_indices(n, sample_count)
     print("\nSaving visual inference samples to:", out_dir)
@@ -366,20 +396,98 @@ def _save_visual_inference_samples(
         if (y_pred is None) or (y_scores is None):
             conf = None
             pred_token = "NA"
-            header = "idx={} true={} pred={} conf={} crop={} {} {} {}".format(
-                int(i), int(y_true[i]), pred_token, "NA", crop_type, record, drive, frame_name
-            )
+            if dual:
+                header = (
+                    "idx={} m_t={} m_p={} loc_t={} loc_p={} crop={} {} {} {}".format(
+                        int(i),
+                        int(y_true[i]),
+                        pred_token,
+                        int(y_true_location[i]),
+                        "NA",
+                        crop_type,
+                        record,
+                        drive,
+                        frame_name,
+                    )
+                )
+            else:
+                header = "idx={} true={} pred={} conf={} crop={} {} {} {}".format(
+                    int(i), int(y_true[i]), pred_token, "NA", crop_type, record, drive, frame_name
+                )
         else:
             conf = float(y_scores[i][int(y_pred[i])])
             pred_token = str(int(y_pred[i]))
-            header = "idx={} true={} pred={} conf={:.3f} crop={} {} {} {}".format(
-                int(i), int(y_true[i]), int(y_pred[i]), conf, crop_type, record, drive, frame_name
-            )
+            if dual:
+                if y_pred_location is not None and y_scores_location is not None:
+                    conf_l = float(y_scores_location[i][int(y_pred_location[i])])
+                    header = (
+                        "idx={} m_t={} m_p={} m_c={:.3f} loc_t={} loc_p={} loc_c={:.3f} crop={} {} {} {}".format(
+                            int(i),
+                            int(y_true[i]),
+                            int(y_pred[i]),
+                            conf,
+                            int(y_true_location[i]),
+                            int(y_pred_location[i]),
+                            conf_l,
+                            crop_type,
+                            record,
+                            drive,
+                            frame_name,
+                        )
+                    )
+                else:
+                    header = (
+                        "idx={} m_t={} m_p={} m_c={:.3f} loc_t={} loc_p=NA crop={} {} {} {}".format(
+                            int(i),
+                            int(y_true[i]),
+                            int(y_pred[i]),
+                            conf,
+                            int(y_true_location[i]),
+                            crop_type,
+                            record,
+                            drive,
+                            frame_name,
+                        )
+                    )
+            else:
+                header = "idx={} true={} pred={} conf={:.3f} crop={} {} {} {}".format(
+                    int(i), int(y_true[i]), int(y_pred[i]), conf, crop_type, record, drive, frame_name
+                )
         mosaic = _mosaic_grid(rendered, rows=3, cols=3, tile_size=360)
         if draw_header:
             mosaic = _draw_label(mosaic, header)
 
-        if conf is None:
+        if dual:
+            loc_tok = "NA" if y_pred_location is None else str(int(y_pred_location[i]))
+            if conf is None:
+                out_name = "test_sample_{:03d}_idx{:05d}_{}_{}_{}_mt{}_mp{}_lt{}_lp{}.jpg".format(
+                    int(out_i),
+                    int(i),
+                    record,
+                    drive,
+                    os.path.splitext(frame_name)[0],
+                    int(y_true[i]),
+                    pred_token,
+                    int(y_true_location[i]),
+                    loc_tok,
+                )
+            else:
+                out_name = (
+                    "test_sample_{:03d}_idx{:05d}_{}_{}_{}_mt{}_mp{}_lt{}_lp{}_mmc{:.3f}_lcc{:.3f}.jpg".format(
+                        int(out_i),
+                        int(i),
+                        record,
+                        drive,
+                        os.path.splitext(frame_name)[0],
+                        int(y_true[i]),
+                        int(y_pred[i]),
+                        int(y_true_location[i]),
+                        int(y_pred_location[i]),
+                        conf,
+                        float(y_scores_location[i][int(y_pred_location[i])]),
+                    )
+                )
+        elif conf is None:
             out_name = "test_sample_{:03d}_idx{:05d}_{}_{}_{}_t{}_p{}.jpg".format(
                 int(out_i), int(i), record, drive, os.path.splitext(frame_name)[0], int(y_true[i]), pred_token
             )
@@ -447,6 +555,8 @@ def run(config_path, auxiliary_loss, test, resume):
     test_data = data_getter_test.get_data()
     val_data = data_getter_val.get_data()
 
+    predict_location = bool(configs['model_opts'].get('predict_location'))
+
     tamformer = TAMformer(configs['model_opts'], auxiliary_loss).tamformer()
     os.makedirs(configs['model_opts']['model_path'], exist_ok=True)
     weights_stem = (
@@ -494,9 +604,16 @@ def run(config_path, auxiliary_loss, test, resume):
                 preview_target_dim = configs['model_opts'].get('target_dim', (224, 224))
                 preview_draw_header = bool(configs['model_opts'].get('visual_sample_draw_header', False))
                 print("\nCreating visual input preview before training...")
+                test_y = test_data['data'][1]
+                if isinstance(test_y, dict):
+                    preview_motion_y = np.asarray(test_y['motion']).astype(int)
+                    preview_loc_y = np.asarray(test_y['location']).astype(int)
+                else:
+                    preview_motion_y = np.asarray(test_y).astype(int)
+                    preview_loc_y = None
                 _save_visual_inference_samples(
                     data_raw_test,
-                    np.asarray(test_data['data'][1]).astype(int),
+                    preview_motion_y,
                     y_pred=None,
                     y_scores=None,
                     out_dir=preview_out_dir,
@@ -506,14 +623,45 @@ def run(config_path, auxiliary_loss, test, resume):
                     enlarge_ratio=preview_enlarge_ratio,
                     target_dim=preview_target_dim,
                     draw_header=preview_draw_header,
+                    y_true_location=preview_loc_y,
                 )
-        class_w = class_weights(configs['model_opts']['apply_class_weights'],
-                                     data_train['count'],
-                                     configs['model_opts'])
         optimizer = get_optimizer(configs['model_opts']['optimizer'])(learning_rate=configs['model_opts']['lr'])
-        tamformer.compile(loss=weighted_sparse_categorical_crossentropy(weights=class_w),
-                          optimizer=optimizer,
-                          metrics=['sparse_categorical_accuracy'])
+        if predict_location:
+            class_w_m = class_weights(
+                configs['model_opts']['apply_class_weights'],
+                data_train['count'],
+                configs['model_opts'],
+                head='motion',
+            )
+            class_w_l = class_weights(
+                configs['model_opts']['apply_class_weights'],
+                data_train['count'],
+                configs['model_opts'],
+                head='location',
+            )
+            loss_m = weighted_sparse_categorical_crossentropy(weights=class_w_m)
+            loss_l = weighted_sparse_categorical_crossentropy(weights=class_w_l)
+            tamformer.compile(
+                loss={'motion': loss_m, 'location': loss_l},
+                optimizer=optimizer,
+                loss_weights={'motion': 1.0, 'location': 1.0},
+                metrics={
+                    'motion': 'sparse_categorical_accuracy',
+                    'location': 'sparse_categorical_accuracy',
+                },
+            )
+        else:
+            class_w = class_weights(
+                configs['model_opts']['apply_class_weights'],
+                data_train['count'],
+                configs['model_opts'],
+                head='motion',
+            )
+            tamformer.compile(
+                loss=weighted_sparse_categorical_crossentropy(weights=class_w),
+                optimizer=optimizer,
+                metrics=['sparse_categorical_accuracy'],
+            )
 
         checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(filepath=model_name,
                                                                  save_weights_only=True,
@@ -533,9 +681,111 @@ def run(config_path, auxiliary_loss, test, resume):
 
     print("Testing ...")
     test_results = tamformer.predict(test_data['data'][0], verbose=1)
-    y_true = np.asarray(test_data['data'][1]).astype(int)
-    y_pred = np.argmax(test_results, axis=1)
     num_classes = configs['model_opts'].get('num_classes', 5)
+    num_location_classes = int(configs['model_opts'].get('num_location_classes', 3))
+    test_y = test_data['data'][1]
+
+    if predict_location:
+        if isinstance(test_results, dict):
+            test_results_m = test_results['motion']
+            test_results_l = test_results['location']
+        else:
+            test_results_m = test_results[0]
+            test_results_l = test_results[1]
+        y_true = np.asarray(test_y['motion']).astype(int)
+        y_true_l = np.asarray(test_y['location']).astype(int)
+        y_pred = np.argmax(test_results_m, axis=1)
+        y_pred_l = np.argmax(test_results_l, axis=1)
+
+        acc = accuracy_score(y_true, y_pred)
+        f1_macro = f1_score(y_true, y_pred, average='macro', zero_division=0)
+        f1_weighted = f1_score(y_true, y_pred, average='weighted', zero_division=0)
+        precision_macro = precision_score(y_true, y_pred, average='macro', zero_division=0)
+        recall_macro = recall_score(y_true, y_pred, average='macro', zero_division=0)
+
+        try:
+            y_true_one_hot = keras.utils.to_categorical(y_true, num_classes=num_classes)
+            auc_macro = roc_auc_score(y_true_one_hot, test_results_m, multi_class='ovr', average='macro')
+        except ValueError:
+            auc_macro = 0.0
+
+        print(
+            'motion acc:', acc,
+            '- auc_macro_ovr:', auc_macro,
+            '- f1_macro:', f1_macro,
+            '- f1_weighted:', f1_weighted,
+            '- precision_macro:', precision_macro,
+            '- recall_macro:', recall_macro,
+        )
+        _print_per_class_metrics(y_true, y_pred, test_results_m, num_classes)
+
+        acc_l = accuracy_score(y_true_l, y_pred_l)
+        f1_macro_l = f1_score(y_true_l, y_pred_l, average='macro', zero_division=0)
+        f1_weighted_l = f1_score(y_true_l, y_pred_l, average='weighted', zero_division=0)
+        precision_macro_l = precision_score(y_true_l, y_pred_l, average='macro', zero_division=0)
+        recall_macro_l = recall_score(y_true_l, y_pred_l, average='macro', zero_division=0)
+        try:
+            y_true_l_oh = keras.utils.to_categorical(y_true_l, num_classes=num_location_classes)
+            auc_macro_l = roc_auc_score(y_true_l_oh, test_results_l, multi_class='ovr', average='macro')
+        except ValueError:
+            auc_macro_l = 0.0
+        print(
+            'location acc:', acc_l,
+            '- auc_macro_ovr:', auc_macro_l,
+            '- f1_macro:', f1_macro_l,
+            '- f1_weighted:', f1_weighted_l,
+            '- precision_macro:', precision_macro_l,
+            '- recall_macro:', recall_macro_l,
+        )
+        _print_per_class_metrics(y_true_l, y_pred_l, test_results_l, num_location_classes)
+
+        joint = float(np.mean((y_true == y_pred) & (y_true_l == y_pred_l)))
+        print('joint accuracy (motion and location both correct):', joint)
+
+        sample_inference_count = configs['model_opts'].get('sample_inference_count', 5)
+        _print_sample_inferences(
+            y_true,
+            y_pred,
+            test_results_m,
+            sample_inference_count,
+            y_true_location=y_true_l,
+            y_pred_location=y_pred_l,
+            y_scores_location=test_results_l,
+        )
+
+        visual_sample_count = int(configs['model_opts'].get('visual_sample_count', 0))
+        if visual_sample_count > 0:
+            visual_frames = int(configs['model_opts'].get('visual_sample_frames', 9))
+            visual_out_dir = configs['model_opts'].get(
+                'visual_sample_out_dir',
+                os.path.join(configs['model_opts'].get('model_path', './models'), 'visual_samples'),
+            )
+            visual_crop_type = configs['model_opts'].get('visual_sample_crop_type', 'auto')
+            if visual_crop_type == 'auto':
+                visual_crop_type = _resolve_visual_crop_type(configs['model_opts'].get('obs_input_type', []))
+            visual_enlarge_ratio = float(configs['model_opts'].get('enlarge_ratio', 1.5))
+            visual_target_dim = configs['model_opts'].get('target_dim', (224, 224))
+            visual_draw_header = bool(configs['model_opts'].get('visual_sample_draw_header', False))
+            _save_visual_inference_samples(
+                data_raw_test,
+                y_true,
+                y_pred,
+                test_results_m,
+                out_dir=visual_out_dir,
+                sample_count=visual_sample_count,
+                num_frames=visual_frames,
+                crop_type=visual_crop_type,
+                enlarge_ratio=visual_enlarge_ratio,
+                target_dim=visual_target_dim,
+                draw_header=visual_draw_header,
+                y_true_location=y_true_l,
+                y_pred_location=y_pred_l,
+                y_scores_location=test_results_l,
+            )
+        return
+
+    y_true = np.asarray(test_y).astype(int)
+    y_pred = np.argmax(test_results, axis=1)
 
     acc = accuracy_score(y_true, y_pred)
     f1_macro = f1_score(y_true, y_pred, average='macro', zero_division=0)
@@ -586,13 +836,19 @@ def run(config_path, auxiliary_loss, test, resume):
             draw_header=visual_draw_header,
         )
 
-def class_weights(apply_weights, sample_count, model_opts):
+def class_weights(apply_weights, sample_count, model_opts, head='motion'):
     if not apply_weights:
         return None
 
-    class_count = sample_count.get('class_count', {})
-    num_classes = model_opts.get('num_classes', 5)
-    configured_weights = model_opts.get('class_weights', [1.0] * num_classes)
+    if head == 'location':
+        class_count = sample_count.get('class_count_location', {})
+        num_classes = int(model_opts.get('num_location_classes', 3))
+        configured_weights = model_opts.get('location_class_weights', [1.0] * num_classes)
+    else:
+        class_count = sample_count.get('class_count', {})
+        num_classes = model_opts.get('num_classes', 5)
+        configured_weights = model_opts.get('class_weights', [1.0] * num_classes)
+
     if len(configured_weights) != num_classes:
         configured_weights = [1.0] * num_classes
 
@@ -605,7 +861,7 @@ def class_weights(apply_weights, sample_count, model_opts):
         count = class_count.get(class_id, 0)
         inv_freq = (total / (num_classes * count)) if count else 1.0
         weights.append(float(configured_weights[class_id]) * float(inv_freq))
-    print("### Class weights:", weights, "###")
+    print("### Class weights ({}): {} ###".format(head, weights))
     return weights
 
 

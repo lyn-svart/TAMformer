@@ -1,0 +1,65 @@
+# Dual-head training: motion (same 21 classes as custom_json) + location (left/center/right).
+#
+# JSON labels (per object in `objs`):
+#   - `motion` — unchanged; see TrackJSONAdapter.MOTION_TO_CLASS in data_generator.py
+#   - `location` — string, case-insensitive: left | center | right
+#     Missing or unknown strings default to center (class 1).
+#
+# Checkpoints are written under model_path so they do not overwrite single-head runs
+# that use ./models with the same lr and obs_input_type.
+model_opts:
+  model: Static
+  backbone: vgg16
+  obs_input_type: [box, local_context]
+  enlarge_ratio: 1.5
+  obs_length: 10
+  time_to_event: 30
+  min_encoding_len: 10
+  balance_data: False
+  apply_class_weights: False
+  dataset: custom_json
+  normalize_boxes: True
+  data_augmentation: False
+  generator: True
+  auto_feat_size: true
+  visual_disk_cache: true
+  visual_disk_cache_train_only: false
+  visual_cache_pooled: true
+  obs_seconds: 1
+  batch_size: 64
+  val_batch_size: 64
+  dropout: 0.1
+  interval: 10
+  classifier_activation: softmax
+  classifier_loss: sparse_categorical_crossentropy
+  epochs: 20
+  optimizer: adam
+  lr: 0.0001
+  model_path: ./models_motion_location
+  step: 3
+  seq_len: 10
+  feat_size: [4, 1, 512]
+  num_classes: 21
+  class_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+  predict_location: true
+  num_location_classes: 3
+  location_class_weights: [1.0, 1.0, 1.0]
+  sample_inference_count: 5
+  visual_sample_count: 3
+  visual_sample_frames: 9
+  visual_sample_out_dir: ./models_motion_location/visual_samples
+  visual_sample_crop_type: auto
+  visual_sample_draw_header: false
+  visual_sample_before_training: true
+data_opts:
+  fstride: 1
+  sample_type: all
+  subset: default
+  data_split_type: default
+  seq_type: crossing
+  min_track_size: 10
+  path_to_json_train: /home/bkaradurak/Projects/ObjectMotionDetection/02-Source/PreventionData/Train.json
+  path_to_json_val: /home/bkaradurak/Projects/ObjectMotionDetection/02-Source/PreventionData/Validation.json
+  path_to_json_test: /home/bkaradurak/Projects/ObjectMotionDetection/02-Source/PreventionData/Test.json
+  path_to_frames_root: /home/bkaradurak/Projects/ObjectMotionDetection/02-Source/PreventionData
+  path_to_json: /home/bkaradurak/Projects/ObjectMotionDetection/01-Code/prevention-data-check/Train.json
