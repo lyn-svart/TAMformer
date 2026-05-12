@@ -583,7 +583,7 @@ class DataGetter(object):
 
         balance = self.model_opts['balance_data'] if self.data_type == 'train' else False
         if balance:
-            self.balance_data_samples(d, self.data_raw['image_dimension'][0])
+            self.balance_data_samples(d, int(self.data_raw['image_dimension'][0][0]))
 
         d['lens'] = d['box'].copy()
         d['tte'] = d['box'].copy()
