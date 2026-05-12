@@ -1,14 +1,14 @@
 # TAMformer Model and Code Guide
 
-This document explains how the model works, how data flows through the codebase, and how the **custom `trackID`-based JSON** pipeline is wired (including **images** and **Keras 3**).
+This document explains how the model works, how data flows through the codebase, and how the **custom `trackID`-based JSON** pipeline is wired (including **images**, optional **motion + location** dual-head training, and **Keras 3**).
 
 ## 1) Big picture
 
 TAMformer is a **sequence classification** model.
 
 - **Input:** a short observation window (`obs_length`) of **per-frame features** per modality (e.g. box, speed, optional CNN visual features).
-- **Output:** a class prediction over **`num_classes`** (config-driven; your setup often uses **21** motion classes from JSON `motion` strings).
-- **Core idea:** temporal transformers per modality with **learned attention masks**, then **cross-attention** using the **last timestep** as query, then a small MLP + **softmax**.
+- **Output:** either a **single** softmax head over **`num_classes`** motion labels (config-driven; **21** classes from JSON `motion` strings is typical), or—when **`predict_location: true`**—**two** heads: **`motion`** (same `num_classes`) and **`location`** (`num_location_classes`, usually **3**: left / center / right from JSON `location`).
+- **Core idea:** temporal transformers per modality with **learned attention masks**, then **cross-attention** using the **last timestep** as query, then a small MLP + **softmax** (one or two output layers sharing that trunk).
 
 Each training sample is one **object track** (grouped by `trackID`), not a single frame.
 
@@ -21,7 +21,8 @@ Each training sample is one **object track** (grouped by `trackID`), not a singl
 | `run.py` | Loads YAML, builds datasets, compiles model, trains, checkpoints, evaluates. TensorFlow import and GPU/thread config run **before** heavy imports. |
 | `data_generator.py` | `TrackJSONAdapter`, `DataGetter`, `DataGenerator` (`Sequence`): JSON → track sequences → batches. Visual pipeline (VGG/ResNet/MobileNet crops + features). |
 | `tamformer.py` | Functional Keras model: masking nets, `TransformerBlock`, classifier. Written for **Keras 3** (`keras.ops`, no `tf.*` on symbolic tensors in the graph). |
-| `configs/configs_custom_json.yaml` | Example config for `dataset: custom_json` (modalities, splits, frames root, optional no-disk visual mode). |
+| `configs/configs_custom_json.yaml` | Example config for `dataset: custom_json` (single motion head; modalities, splits, frames root, optional no-disk visual mode). |
+| `configs/configs_custom_json_motion_location.yaml` | Same stack with **`predict_location: true`**: dual heads; separate **`model_path`** so checkpoints do not overwrite single-head runs. |
 | `scripts/split_custom_json_tracks.py` | Splits one frame-keyed JSON into **track-disjoint** `train.json` / `val.json` / `test.json`. |
 | `scripts/visualize_custom_json_inputs.py` | Draws frames + bbox + motion for sanity checks (optional `RECORD`/`DRIVE` overlay). |
 | `scripts/show_track_sequence_example.py` | Prints raw vs processed tensor shapes for one track. |
@@ -39,6 +40,7 @@ Frame-keyed dict:
   - `trackID`
   - `xywh` (normalized in image space)
   - `motion` (string label)
+  - `location` (optional string: **`left`**, **`center`**, **`right`**; case-insensitive). Used only when **`predict_location`** is enabled in config; missing/unknown values default to **center** (class id **1**).
   - `img_width`, `img_height`
   - `Vx`, `Vz` (used for speed magnitude)
 
@@ -53,9 +55,12 @@ Frame-keyed dict:
 - **BBox:** `xywh` → absolute `[x1, y1, x2, y2]` using stored image dimensions.
 - **Center:** derived from bbox.
 - **Speed:** `sqrt(Vx² + Vz²)` with safe numeric handling.
-- **Class:** `motion` string → integer via `TrackJSONAdapter.MOTION_TO_CLASS` (extended set; unknown strings map to **`stopped`**-class id **3** by default). Final sequence label uses the **last timestep** class in `DataGetter.get_data_sequence()`.
+- **Class (motion):** `motion` string → integer via `TrackJSONAdapter.MOTION_TO_CLASS` (extended set; unknown strings map to **`stopped`**-class id **3** by default).
+- **Class (location):** when dual-head training is enabled, `location` string → integer via **`TrackJSONAdapter.LOCATION_TO_CLASS`** (`left`→0, `center`→1, `right`→2). Parallel per-frame lists are stored in **`location_activities`** (same length and chunking as **`activities`**).
 
-Adapter output keys used downstream: `image`, `pid`, `bbox`, `center`, `obd_speed`, `activities`, `image_dimension`.
+Final sequence labels for both tasks use the **last timestep** in `DataGetter.get_data_sequence()` (`labels` = motion, `labels_location` = location when `predict_location` is on).
+
+Adapter output keys used downstream: `image`, `pid`, `bbox`, `center`, `obd_speed`, `activities`, **`location_activities`** (present for `TrackJSONAdapter`; JAAD/PIE do not supply it—see §5), `image_dimension`.
 
 ### 3.4 Resolving frame paths on disk
 
@@ -99,9 +104,12 @@ python scripts/split_custom_json_tracks.py \
 `get_data_sequence()`:
 
 1. Reads `bbox`, `pid`, `activities`, optional `speed`, etc.
-2. **`obs_length`** = `obs_seconds * (interval / fstride)` (clamped to at least 1).
-3. Pads short tracks from the **start** (repeat first frame), then keeps the **last** `obs_length` steps.
-4. Builds **`labels`** from the last timestep’s class.
+2. If **`model_opts.predict_location`**: attaches **`location`** sequences from **`location_activities`** when present; otherwise fills **center** for every timestep and prints a one-time warning (JAAD/PIE).
+3. **`obs_length`** = `obs_seconds * (interval / fstride)` (clamped to at least 1).
+4. Pads short tracks from the **start** (repeat first frame), then keeps the **last** `obs_length` steps.
+5. Builds **`labels`** from the last timestep’s motion class; if **`predict_location`**, also **`labels_location`** and **`class_count_location`** inside the returned **`count`** bundle.
+
+When **`balance_data`** mirrors samples with horizontal flips, **`location`** labels are **left↔right swapped** (0↔2) so they stay consistent with flipped boxes.
 
 `get_data()` loops `model_opts['obs_input_type']`:
 
@@ -137,6 +145,7 @@ Set `feat_size` last dimension to match that vector (e.g. **`[4, 1, 512]`** for 
 
 - Subclasses **`Sequence`** and calls **`super().__init__(**kwargs)`** (Keras 3 / `PyDataset` expectation).
 - Yields **`(tuple(X), y)`** — Keras 3’s data adapter requires **`tuple`**, not a **`list`**, for multi-input.
+- **`y`** is a **1D int32 vector** of motion class ids per batch row when **`predict_location`** is **false**. When **`predict_location`** is **true**, **`y`** is a **dict** `{'motion': ..., 'location': ...}` aligned with the model’s named outputs.
 - **`_generate_X`**: for cached visual inputs, elements are **`.pkl` paths`** (`str`). For **`visual_disk_cache: false`**, each timestep is a **`__LIVE_VISUAL__`** tuple; the generator runs **`_live_visual_vector()`** using `opts['_live_visual_parent']` (the `DataGetter`) for **`jitter_bbox` / `squarify` / `img_pad`** consistency with the cache path.
 
 ---
@@ -146,7 +155,8 @@ Set `feat_size` last dimension to match that vector (e.g. **`[4, 1, 512]`** for 
 - Mask assembly uses **`keras.ops`** (`expand_dims`, `transpose`, `mean`, `square`, …) inside **`Lambda`**, not raw **`tf.*`** on **`KerasTensor`**.
 - **`TransformerBlock.call(..., training=None, ...)`** — `training` must default to **`None`** so symbolic builds do not require a positional `training` argument.
 - Attention mask **rounding** runs only when **`training is False`** (inference). Rounding when `training` was **`None`** previously disconnected mask subnets from the loss (no gradients).
-- **`ModelCheckpoint`** with **`save_weights_only=True`** must use a filepath ending in **`.weights.h5`**; `run.py` uses that and can fall back to legacy **`.h5`** when **loading** old files.
+- **Classifier:** default is one **`Dense(num_classes, softmax, name='output')`**. If **`model_opts.predict_location`** is **true**, that layer is replaced by two heads on the same features: **`Dense(..., name='motion')`** and **`Dense(num_location_classes, softmax, name='location')`** (`outputs=[motion, location]`).
+- **`ModelCheckpoint`** with **`save_weights_only=True`** must use a filepath ending in **`.weights.h5`**; `run.py` uses that and can fall back to legacy **`.h5`** when **loading** old files. Dual-head checkpoints only load into a dual-head graph (and vice versa for single-head weights).
 
 ---
 
@@ -155,9 +165,11 @@ Set `feat_size` last dimension to match that vector (e.g. **`[4, 1, 512]`** for 
 1. Load YAML.
 2. **`custom_json`**: optional split JSONs + optional **`path_to_frames_root`** passed into **`TrackJSONAdapter`**.
 3. **`DataGetter`** / **`DataGenerator`** for train, val, test.
-4. Build **`TAMformer`**, compile (weighted sparse CE unless disabled).
-5. **`fit`** with checkpoint on **`val_loss`**.
-6. Reload best weights, **`predict`** on test, print metrics.
+4. Build **`TAMformer`**, compile:
+   - **Single head:** one weighted sparse categorical loss + **`sparse_categorical_accuracy`**.
+   - **Dual head (`predict_location`):** per-head losses (**`motion`**, **`location`**), optional **`class_weights`** / **`location_class_weights`** via **`class_weights(..., head='motion'|'location')`**, equal **`loss_weights`** by default, per-output **`sparse_categorical_accuracy`**.
+5. **`fit`** with checkpoint on **`val_loss`** (sum of heads when dual).
+6. Reload best weights, **`predict`** on test, print metrics (dual: motion + location metrics, joint accuracy, sample lines with string names; **`test_data['data'][1]`** is a **`dict`** with **`motion`** / **`location`** arrays).
 
 ---
 
@@ -169,13 +181,22 @@ Set `feat_size` last dimension to match that vector (e.g. **`[4, 1, 512]`** for 
 - **Frames on disk:** `path_to_frames_root` + adapter path resolution.
 - **Visual:** `local_context` (etc.) + **`visual_disk_cache`** live vs disk modes; safe cache filenames (sanitize `trackID`); **`RECORD/DRIVE`**-aware cache folders.
 - **Data adapter:** **`tuple(X)`**; **`Sequence`** **`super().__init__`**.
+- **Dual-head motion + location:** JSON **`location`** field, **`location_activities`**, **`predict_location`** config, two softmax heads, dict **`y`** from the generator, extended **`run.py`** eval and visual sample headers/filenames.
 
 ---
 
 ## 11) How to run
 
+**Single-head (motion only):**
+
 ```bash
 python run.py --config_file configs/configs_custom_json.yaml
+```
+
+**Dual-head (motion + location):**
+
+```bash
+python run.py --config_file configs/configs_custom_json_motion_location.yaml
 ```
 
 **`custom_json` checklist in YAML:**
@@ -185,6 +206,7 @@ python run.py --config_file configs/configs_custom_json.yaml
 - Prefer **`path_to_json_train` / `val` / `test`** over a single `path_to_json`.
 - **`data_opts.path_to_frames_root`** if JSON keys are not absolute valid image paths.
 - **`visual_disk_cache`**: `false` if you cannot store `data/features/...` (trade speed/disk).
+- **Dual-head:** set **`predict_location: true`**, **`num_location_classes: 3`**, **`location_class_weights`** as needed; use a **separate `model_path`** (as in **`configs_custom_json_motion_location.yaml`**) so weights files do not collide with single-head training. Ensure each **`objs[]`** entry includes **`location`** when you care about that head’s supervision (otherwise the adapter defaults missing values to **center**).
 
 **Sanity-check frames (optional):**
 
@@ -207,8 +229,8 @@ python scripts/visualize_custom_json_inputs.py \
 
 ## 13) Mental model
 
-- **`data_generator.py`:** tracks → fixed-length tensors (and optional CNN features per frame).
-- **`tamformer.py`:** temporal attention + masks + cross-attention → class logits.
-- **`run.py`:** configuration, training loop, checkpointing, evaluation.
+- **`data_generator.py`:** tracks → fixed-length tensors (and optional CNN features per frame); optional parallel **`location`** sequences for dual-head training.
+- **`tamformer.py`:** temporal attention + masks + cross-attention → one or two softmax heads (motion / optional location).
+- **`run.py`:** configuration, training loop, checkpointing, evaluation (including joint motion+location accuracy when dual-head).
 
-That is the end-to-end picture for this repository’s **`custom_json`** + **optional image** stack.
+That is the end-to-end picture for this repository’s **`custom_json`** + **optional image** stack, with optional **motion + location** dual-head mode.
