@@ -1,0 +1,4 @@
+# PyTorch baselines (R3D-18): pip install -r requirements-baselines.txt
+torch>=2.0.0
+torchvision>=0.15.0
+tqdm>=4.65.0
