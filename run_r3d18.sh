@@ -20,6 +20,7 @@ set -euo pipefail
 SOURCE="${1:-${SOURCE:-/path/to/PreventionData}}"
 
 SAVE_DIR="${SAVE_DIR:-}"
+RESULTS_DIR="${RESULTS_DIR:-}"                  # empty → <save-dir>/results
 FRAMES_ROOT="${FRAMES_ROOT:-}"                  # empty → same as SOURCE
 
 TRAIN_JSON="${TRAIN_JSON:-}"
@@ -54,6 +55,7 @@ echo "============================================================"
 echo "  SOURCE         : $SOURCE"
 echo "  FRAMES_ROOT    : ${FRAMES_ROOT:-<same as SOURCE>}"
 echo "  SAVE_DIR       : ${SAVE_DIR:-<auto>}"
+echo "  RESULTS_DIR    : ${RESULTS_DIR:-<save-dir>/results>}"
 echo "  CLIP_LEN (T)   : $CLIP_LEN"
 echo "  CHUNK_STRIDE   : $CHUNK_STRIDE"
 echo "  INPUT_SIZE     : $INPUT_SIZE"
@@ -69,6 +71,7 @@ echo ""
 
 EXTRA_FLAGS=""
 [ -n "$SAVE_DIR"       ] && EXTRA_FLAGS="$EXTRA_FLAGS --save-dir       $SAVE_DIR"
+[ -n "$RESULTS_DIR"    ] && EXTRA_FLAGS="$EXTRA_FLAGS --results-dir    $RESULTS_DIR"
 [ -n "$FRAMES_ROOT"    ] && EXTRA_FLAGS="$EXTRA_FLAGS --frames-root    $FRAMES_ROOT"
 [ -n "$TRAIN_JSON"     ] && EXTRA_FLAGS="$EXTRA_FLAGS --train-json     $TRAIN_JSON"
 [ -n "$VAL_JSON"       ] && EXTRA_FLAGS="$EXTRA_FLAGS --val-json       $VAL_JSON"

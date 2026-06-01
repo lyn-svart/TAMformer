@@ -35,6 +35,18 @@ bash run_r3d18.sh
 
 Checkpoints: `<SOURCE>/../checkpoints/best_r3d18.pt` (or `SAVE_DIR`).
 
+## Result logs (txt)
+
+After each run, metrics are written under the results directory:
+
+| File | R3D-18 | TAMformer |
+|------|--------|-----------|
+| Training | `<save-dir>/results/training_results.txt` | `<results_log_dir>/training_results.txt` |
+| Test | `<save-dir>/results/test_results.txt` | `<results_log_dir>/test_results.txt` |
+
+Override R3D: `RESULTS_DIR=/path/to/logs bash run_r3d18.sh`  
+TAMformer: set `model_opts.results_log_dir` in the YAML (default `./models_motion_location/results`).
+
 ## Compare metrics
 
 R3D-18 test output uses the same summary line as TAMformer motion eval:

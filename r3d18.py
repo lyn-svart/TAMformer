@@ -37,6 +37,16 @@ from motion_labels import (
     CLASS_ID_TO_NAME,
     motion_to_class,
 )
+from result_logging import (
+    default_results_dir,
+    format_motion_metrics_line,
+    format_per_class_metrics,
+    test_log_path,
+    training_log_path,
+    write_run_header,
+    write_test_results,
+    append_epoch_line,
+)
 
 PAT = re.compile(
     r"(?:^|[\\/])(RECORD[^\\/]+)[\\/](DRIVE[^\\/]+)[\\/]frames[\\/](\d+)\.(png|jpg|jpeg)$",
@@ -59,6 +69,9 @@ def parse_args():
                          help="Frame files root (default: same as --source)")
     g_paths.add_argument("--save-dir", default=None,
                          help="Checkpoints dir (default: <source>/../checkpoints)")
+    g_paths.add_argument("--results-dir", default=None,
+                         help="Directory for training_results.txt and test_results.txt "
+                              "(default: <save-dir>/results)")
     g_paths.add_argument("--train-json", default=None)
     g_paths.add_argument("--val-json", default=None)
     g_paths.add_argument("--test-json", default=None)
@@ -379,26 +392,33 @@ def evaluate(model, loader, device, num_classes: int = NUM_MOTION_CLASSES):
     return acc, metrics
 
 
+def motion_metrics_line(metrics: dict, header: str = "motion") -> str:
+    return format_motion_metrics_line(
+        header,
+        metrics["acc"],
+        metrics["auc_macro_ovr"],
+        metrics["f1_macro"],
+        metrics["f1_weighted"],
+        metrics["precision_macro"],
+        metrics["recall_macro"],
+    )
+
+
 def print_motion_metrics(metrics: dict, header: str = "motion"):
-    print(
-        f"{header} acc:", metrics["acc"],
-        "- auc_macro_ovr:", metrics["auc_macro_ovr"],
-        "- f1_macro:", metrics["f1_macro"],
-        "- f1_weighted:", metrics["f1_weighted"],
-        "- precision_macro:", metrics["precision_macro"],
-        "- recall_macro:", metrics["recall_macro"],
+    print(motion_metrics_line(metrics, header=header))
+
+
+def sklearn_classification_report(y_true, y_pred, num_classes: int = NUM_MOTION_CLASSES) -> str:
+    labels = list(range(num_classes))
+    target_names = [CLASS_ID_TO_NAME.get(i, str(i)) for i in labels]
+    return classification_report(
+        y_true, y_pred, labels=labels, target_names=target_names,
+        zero_division=0, digits=3,
     )
 
 
 def print_per_class_report(y_true, y_pred, num_classes: int = NUM_MOTION_CLASSES):
-    labels = list(range(num_classes))
-    target_names = [CLASS_ID_TO_NAME.get(i, str(i)) for i in labels]
-    print(
-        classification_report(
-            y_true, y_pred, labels=labels, target_names=target_names,
-            zero_division=0, digits=3,
-        )
-    )
+    print(sklearn_classification_report(y_true, y_pred, num_classes))
 
 
 def main():
@@ -414,6 +434,9 @@ def main():
     test_json = args.test_json or os.path.join(source, "Test.json")
 
     os.makedirs(save_dir, exist_ok=True)
+    results_dir = args.results_dir or default_results_dir(save_dir)
+    train_log_file = training_log_path(results_dir)
+    test_log_file = test_log_path(results_dir)
     best_model_path = os.path.join(save_dir, "best_r3d18.pt")
 
     assert Path(source).exists(), f"--source not found: {source}"
@@ -432,14 +455,49 @@ def main():
     print(f"  lr           : {args.lr}")
     print(f"  epochs       : {args.epochs}")
     print(f"  patience     : {args.patience}")
+    print(f"  results_dir  : {results_dir}")
     print("=" * 60)
+
+    write_run_header(
+        train_log_file,
+        "R3D-18 training (TAMformer-aligned)",
+        [
+            f"source: {source}",
+            f"frames_root: {frames_root}",
+            f"train_json: {train_json}",
+            f"val_json: {val_json}",
+            f"test_json: {test_json}",
+            f"clip_len: {args.clip_len}",
+            f"chunk_stride: {args.chunk_stride}",
+            f"batch_size: {args.batch_size}",
+            f"lr: {args.lr}",
+            f"epochs: {args.epochs}",
+            f"patience: {args.patience}",
+            f"seed: {args.seed}",
+            f"device: pending",
+        ],
+    )
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")
+    append_epoch_line(train_log_file, f"device: {device}")
 
     train_set = PreventionClipsFromFrames(train_json, frames_root, args, args.use_fraction)
     val_set = PreventionClipsFromFrames(val_json, frames_root, args, args.use_fraction)
     test_set = PreventionClipsFromFrames(test_json, frames_root, args, args.use_fraction)
+    append_epoch_line(
+        train_log_file,
+        "samples train/val/test: {}/{}/{}".format(
+            len(train_set), len(val_set), len(test_set),
+        ),
+    )
+    append_epoch_line(train_log_file, "-" * 72)
+    append_epoch_line(
+        train_log_file,
+        "{:>5}  {:>12}  {:>12}  {:>10}  {}".format(
+            "epoch", "train_loss", "val_loss", "val_acc", "notes",
+        ),
+    )
 
     loader_kw = dict(
         batch_size=args.batch_size,
@@ -481,6 +539,7 @@ def main():
         print(f"Train Loss: {train_loss:.4f}  |  Val Loss: {val_loss:.4f}  |  Val Acc: {val_acc:.3f}")
         print_motion_metrics(val_metrics, header="val motion")
 
+        notes = ""
         if val_loss < best_loss:
             best_loss, no_improve = val_loss, 0
             torch.save(
@@ -492,13 +551,31 @@ def main():
                 },
                 best_model_path,
             )
+            notes = "saved best"
             print(f"New best model saved (val_loss={best_loss:.4f})")
         else:
             no_improve += 1
+            notes = "patience {}/{}".format(no_improve, args.patience)
             print(f"No improvement - patience {no_improve}/{args.patience}")
             if args.patience < args.epochs and no_improve >= args.patience:
                 print("Early stopping triggered.")
+                notes = "early stop"
+                append_epoch_line(
+                    train_log_file,
+                    "{:>5}  {:>12.6f}  {:>12.6f}  {:>10.4f}  {}".format(
+                        epoch, train_loss, val_loss, val_acc, notes,
+                    ),
+                )
+                append_epoch_line(train_log_file, motion_metrics_line(val_metrics, "val motion"))
                 break
+
+        append_epoch_line(
+            train_log_file,
+            "{:>5}  {:>12.6f}  {:>12.6f}  {:>10.4f}  {}".format(
+                epoch, train_loss, val_loss, val_acc, notes,
+            ),
+        )
+        append_epoch_line(train_log_file, motion_metrics_line(val_metrics, "val motion"))
 
     print("\nTraining done — loading best model for test…")
     ckpt = torch.load(best_model_path, map_location=device)
@@ -510,7 +587,36 @@ def main():
     print_motion_metrics(test_metrics, header="motion")
     print("\nPer-class classification report:")
     print_per_class_report(test_metrics["y_true"], test_metrics["y_pred"])
+
+    test_motion_line = motion_metrics_line(test_metrics, header="motion")
+    test_per_class = format_per_class_metrics(
+        test_metrics["y_true"],
+        test_metrics["y_pred"],
+        test_metrics["y_scores"],
+        NUM_MOTION_CLASSES,
+        CLASS_ID_TO_NAME,
+    )
+    sk_report = sklearn_classification_report(
+        test_metrics["y_true"], test_metrics["y_pred"],
+    )
+    write_test_results(
+        test_log_file,
+        [
+            f"source: {source}",
+            f"frames_root: {frames_root}",
+            f"test_json: {test_json}",
+            f"best_checkpoint: {best_model_path}",
+            f"best_val_loss: {best_loss}",
+            test_motion_line,
+            test_per_class,
+            "Sklearn classification report:",
+            sk_report,
+        ],
+    )
+
     print(f"Best model saved to: {best_model_path}")
+    print("Training log written to:", train_log_file)
+    print("Test results written to:", test_log_file)
 
 
 if __name__ == "__main__":

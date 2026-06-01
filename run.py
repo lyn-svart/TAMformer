@@ -41,8 +41,20 @@ from pie_data import PIE
 from jaad_data import JAAD
 from data_generator import DataGenerator, DataGetter, TrackJSONAdapter
 from tamformer import TAMformer
+from motion_labels import CLASS_ID_TO_NAME
+from result_logging import (
+    default_results_dir,
+    format_motion_metrics_line,
+    format_per_class_metrics,
+    test_log_path,
+    training_log_path,
+    write_keras_training_history,
+    write_run_header,
+    write_test_results,
+)
 
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+from sklearn.metrics import classification_report
 from tensorflow.keras.optimizers import Adam, SGD, RMSprop
 from tensorflow import keras
 
@@ -126,45 +138,14 @@ def _print_sample_inferences(y_true, y_pred, y_scores, sample_count=5,
             )
 
 
-def _print_per_class_metrics(y_true, y_pred, y_scores, num_classes):
+def _print_per_class_metrics(y_true, y_pred, y_scores, num_classes, class_names=None):
     """Print class-wise accuracy/confidence diagnostics."""
-    print("\nPer-class metrics:")
-    header = "{:>7} {:>8} {:>10} {:>10} {:>10} {:>16} {:>16}".format(
-        "class", "support", "acc/recall", "precision", "f1", "avg_true_conf", "avg_pred_conf"
-    )
-    print(header)
-    print("-" * len(header))
+    text = format_per_class_metrics(y_true, y_pred, y_scores, num_classes, class_names)
+    print(text)
+    return text
 
-    for class_id in range(int(num_classes)):
-        true_mask = (y_true == class_id)
-        pred_mask = (y_pred == class_id)
-        support = int(np.sum(true_mask))
-        pred_count = int(np.sum(pred_mask))
-        tp = int(np.sum(true_mask & pred_mask))
 
-        recall = (tp / support) if support else 0.0  # class accuracy
-        precision = (tp / pred_count) if pred_count else 0.0
-        if precision + recall == 0:
-            f1 = 0.0
-        else:
-            f1 = 2 * precision * recall / (precision + recall)
-
-        if support:
-            avg_true_conf = float(np.mean(y_scores[true_mask, class_id]))
-        else:
-            avg_true_conf = 0.0
-
-        if pred_count:
-            pred_idx = np.where(pred_mask)[0]
-            avg_pred_conf = float(np.mean(y_scores[pred_idx, class_id]))
-        else:
-            avg_pred_conf = 0.0
-
-        print(
-            "{:>7} {:>8} {:>10.4f} {:>10.4f} {:>10.4f} {:>16.4f} {:>16.4f}".format(
-                class_id, support, recall, precision, f1, avg_true_conf, avg_pred_conf
-            )
-        )
+LOCATION_ID_TO_NAME = {0: 'left', 1: 'center', 2: 'right'}
 
 
 def _safe_imread(path):
@@ -572,6 +553,12 @@ def run(config_path, auxiliary_loss, test, resume):
     model_name = weights_stem + '.weights.h5'
     legacy_weights_h5 = weights_stem + '.h5'
 
+    results_dir = configs['model_opts'].get('results_log_dir')
+    if not results_dir:
+        results_dir = default_results_dir(configs['model_opts']['model_path'])
+    else:
+        os.makedirs(results_dir, exist_ok=True)
+
     def _weights_file_to_load():
         if os.path.isfile(model_name):
             return model_name
@@ -588,7 +575,25 @@ def run(config_path, auxiliary_loss, test, resume):
             tamformer.load_weights(load_path)
         else:
             tamformer.load_weights(load_path, by_name=False, skip_mismatch=False)
+
+    history = None
+    train_log_file = training_log_path(results_dir)
+
     if not test:
+        write_run_header(
+            train_log_file,
+            "TAMformer training",
+            [
+                "config_file: {}".format(config_path),
+                "dataset: {}".format(configs['model_opts']['dataset']),
+                "predict_location: {}".format(predict_location),
+                "model_path: {}".format(configs['model_opts']['model_path']),
+                "epochs: {}".format(configs['model_opts']['epochs']),
+                "batch_size: {}".format(configs['model_opts']['batch_size']),
+                "lr: {}".format(configs['model_opts']['lr']),
+                "obs_input_type: {}".format(configs['model_opts']['obs_input_type']),
+            ],
+        )
         if bool(configs['model_opts'].get('visual_sample_before_training', False)):
             preview_count = int(configs['model_opts'].get('visual_sample_count', 0))
             if preview_count > 0:
@@ -675,6 +680,8 @@ def run(config_path, auxiliary_loss, test, resume):
                                 validation_data=val_data['data'][0],
                                 verbose=1,
                                 callbacks=[checkpoint_callback])
+        write_keras_training_history(train_log_file, history)
+        print("Training log written to:", train_log_file)
 
         tamformer = TAMformer(configs['model_opts'], auxiliary_loss).tamformer()
         tamformer.load_weights(model_name)
@@ -709,15 +716,13 @@ def run(config_path, auxiliary_loss, test, resume):
         except ValueError:
             auc_macro = 0.0
 
-        print(
-            'motion acc:', acc,
-            '- auc_macro_ovr:', auc_macro,
-            '- f1_macro:', f1_macro,
-            '- f1_weighted:', f1_weighted,
-            '- precision_macro:', precision_macro,
-            '- recall_macro:', recall_macro,
+        motion_line = format_motion_metrics_line(
+            'motion', acc, auc_macro, f1_macro, f1_weighted, precision_macro, recall_macro,
         )
-        _print_per_class_metrics(y_true, y_pred, test_results_m, num_classes)
+        print(motion_line)
+        motion_per_class = _print_per_class_metrics(
+            y_true, y_pred, test_results_m, num_classes, CLASS_ID_TO_NAME,
+        )
 
         acc_l = accuracy_score(y_true_l, y_pred_l)
         f1_macro_l = f1_score(y_true_l, y_pred_l, average='macro', zero_division=0)
@@ -729,18 +734,39 @@ def run(config_path, auxiliary_loss, test, resume):
             auc_macro_l = roc_auc_score(y_true_l_oh, test_results_l, multi_class='ovr', average='macro')
         except ValueError:
             auc_macro_l = 0.0
-        print(
-            'location acc:', acc_l,
-            '- auc_macro_ovr:', auc_macro_l,
-            '- f1_macro:', f1_macro_l,
-            '- f1_weighted:', f1_weighted_l,
-            '- precision_macro:', precision_macro_l,
-            '- recall_macro:', recall_macro_l,
+        location_line = format_motion_metrics_line(
+            'location', acc_l, auc_macro_l, f1_macro_l, f1_weighted_l,
+            precision_macro_l, recall_macro_l,
         )
-        _print_per_class_metrics(y_true_l, y_pred_l, test_results_l, num_location_classes)
+        print(location_line)
+        location_per_class = _print_per_class_metrics(
+            y_true_l, y_pred_l, test_results_l, num_location_classes, LOCATION_ID_TO_NAME,
+        )
 
         joint = float(np.mean((y_true == y_pred) & (y_true_l == y_pred_l)))
-        print('joint accuracy (motion and location both correct):', joint)
+        joint_line = 'joint accuracy (motion and location both correct): {}'.format(joint)
+        print(joint_line)
+
+        test_sections = [
+            "config_file: {}".format(config_path),
+            "weights: {}".format(_weights_file_to_load()),
+            motion_line,
+            motion_per_class,
+            location_line,
+            location_per_class,
+            joint_line,
+        ]
+        labels = list(range(num_classes))
+        target_names = [CLASS_ID_TO_NAME.get(i, str(i)) for i in labels]
+        test_sections.append(
+            classification_report(
+                y_true, y_pred, labels=labels, target_names=target_names,
+                zero_division=0, digits=3,
+            )
+        )
+        test_out = test_log_path(results_dir)
+        write_test_results(test_out, test_sections)
+        print("Test results written to:", test_out)
 
         sample_inference_count = configs['model_opts'].get('sample_inference_count', 5)
         _print_sample_inferences(
@@ -799,13 +825,34 @@ def run(config_path, auxiliary_loss, test, resume):
     except ValueError:
         auc_macro = 0.0
 
-    print('acc:', acc,
-          '- auc_macro_ovr:', auc_macro,
-          '- f1_macro:', f1_macro,
-          '- f1_weighted:', f1_weighted,
-          '- precision_macro:', precision_macro,
-          '- recall_macro:', recall_macro)
-    _print_per_class_metrics(y_true, y_pred, test_results, num_classes)
+    motion_line = format_motion_metrics_line(
+        'motion', acc, auc_macro, f1_macro, f1_weighted, precision_macro, recall_macro,
+    )
+    print(motion_line)
+    motion_per_class = _print_per_class_metrics(
+        y_true, y_pred, test_results, num_classes, CLASS_ID_TO_NAME,
+    )
+    labels = list(range(num_classes))
+    target_names = [CLASS_ID_TO_NAME.get(i, str(i)) for i in labels]
+    sk_report = classification_report(
+        y_true, y_pred, labels=labels, target_names=target_names,
+        zero_division=0, digits=3,
+    )
+    print("\nSklearn classification report:\n", sk_report)
+
+    test_out = test_log_path(results_dir)
+    write_test_results(
+        test_out,
+        [
+            "config_file: {}".format(config_path),
+            "weights: {}".format(_weights_file_to_load()),
+            motion_line,
+            motion_per_class,
+            sk_report,
+        ],
+    )
+    print("Test results written to:", test_out)
+
     sample_inference_count = configs['model_opts'].get('sample_inference_count', 5)
     _print_sample_inferences(y_true, y_pred, test_results, sample_inference_count)
 

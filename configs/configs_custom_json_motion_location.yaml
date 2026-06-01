@@ -36,6 +36,8 @@ model_opts:
   optimizer: adam
   lr: 0.0001
   model_path: ./models_motion_location
+  # training_results.txt and test_results.txt (default: <model_path>/results)
+  results_log_dir: ./models_motion_location/results
   step: 3
   seq_len: 10
   feat_size: [4, 1, 512]
