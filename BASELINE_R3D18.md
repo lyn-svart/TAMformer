@@ -33,6 +33,14 @@ BATCH=64 LR=1e-4 EPOCHS=20 PATIENCE=20 SEED=42 \
 bash run_r3d18.sh
 ```
 
+Performance-oriented run (same data semantics, faster pipeline):
+
+```bash
+SOURCE=/path/to/PreventionData \
+BATCH=128 WORKERS=16 PREFETCH_FACTOR=4 CACHE_SIZE=50000 COMPILE=1 \
+bash run_r3d18.sh
+```
+
 Checkpoints: `<SOURCE>/../checkpoints/best_r3d18.pt` (or `SAVE_DIR`).
 
 ## Result logs (txt)
@@ -46,6 +54,22 @@ After each run, metrics are written under the results directory:
 
 Override R3D: `RESULTS_DIR=/path/to/logs bash run_r3d18.sh`  
 TAMformer: set `model_opts.results_log_dir` in the YAML (default `./models_motion_location/results`).
+
+## Diagnose epoch duration from logs
+
+In `training_results.txt`, use:
+
+- `samples train/val/test: X/Y/Z` for dataset scale
+- per-epoch `sec/batch` and `samp/sec` columns for throughput
+
+Quick estimate:
+
+```text
+steps_per_epoch ~= ceil(train_samples / BATCH)
+epoch_seconds ~= steps_per_epoch * sec_per_batch
+```
+
+If `train_samples` is very large and `sec/batch` is high, training is data-loader bound.
 
 ## Compare metrics
 

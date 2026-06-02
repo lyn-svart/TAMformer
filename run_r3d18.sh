@@ -41,6 +41,9 @@ EPOCHS="${EPOCHS:-20}"
 PATIENCE="${PATIENCE:-20}"
 FRACTION="${FRACTION:-1.0}"
 WORKERS="${WORKERS:-8}"
+PREFETCH_FACTOR="${PREFETCH_FACTOR:-4}"
+CACHE_SIZE="${CACHE_SIZE:-50000}"
+COMPILE="${COMPILE:-}"
 SEED="${SEED:-42}"
 FRAME_KEEP_MOD="${FRAME_KEEP_MOD:-1}"           # legacy CLI; sliding windows use consecutive frames
 
@@ -65,6 +68,9 @@ echo "  EPOCHS         : $EPOCHS"
 echo "  PATIENCE       : $PATIENCE"
 echo "  FRACTION       : $FRACTION"
 echo "  WORKERS        : $WORKERS"
+echo "  PREFETCH       : $PREFETCH_FACTOR"
+echo "  CACHE_SIZE     : $CACHE_SIZE"
+echo "  COMPILE        : ${COMPILE:-off}"
 echo "  SEED           : $SEED"
 echo "============================================================"
 echo ""
@@ -77,6 +83,7 @@ EXTRA_FLAGS=""
 [ -n "$VAL_JSON"       ] && EXTRA_FLAGS="$EXTRA_FLAGS --val-json       $VAL_JSON"
 [ -n "$TEST_JSON"      ] && EXTRA_FLAGS="$EXTRA_FLAGS --test-json      $TEST_JSON"
 [ -n "$WEIGHTED_SAMPLER" ] && EXTRA_FLAGS="$EXTRA_FLAGS --weighted-sampler"
+[ -n "$COMPILE"        ] && EXTRA_FLAGS="$EXTRA_FLAGS --compile"
 
 $PYTHON "$SCRIPT_DIR/r3d18.py" \
     --source         "$SOURCE"        \
@@ -91,6 +98,8 @@ $PYTHON "$SCRIPT_DIR/r3d18.py" \
     --patience       "$PATIENCE"      \
     --use-fraction   "$FRACTION"      \
     --num-workers    "$WORKERS"       \
+    --prefetch-factor "$PREFETCH_FACTOR" \
+    --cache-size     "$CACHE_SIZE"    \
     --seed           "$SEED"          \
     --frame-keep-mod "$FRAME_KEEP_MOD" \
     $EXTRA_FLAGS

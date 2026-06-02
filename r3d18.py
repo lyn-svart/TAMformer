@@ -12,11 +12,12 @@ import re
 import json
 import random
 import argparse
+import time
 import cv2
 import numpy as np
 from pathlib import Path
 from typing import List, Tuple, Dict, Optional
-from collections import Counter
+from collections import Counter, OrderedDict
 from tqdm import tqdm
 
 import torch
@@ -95,9 +96,15 @@ def parse_args():
                          help="Early stopping patience (>= epochs disables early stop)")
     g_train.add_argument("--use-fraction", type=float, default=1.0)
     g_train.add_argument("--num-workers", type=int, default=8)
+    g_train.add_argument("--prefetch-factor", type=int, default=4,
+                         help="DataLoader prefetch factor when num_workers > 0")
     g_train.add_argument("--seed", type=int, default=42)
     g_train.add_argument("--weighted-sampler", action="store_true",
                          help="WeightedRandomSampler (off matches TAMformer balance_data/apply_class_weights)")
+    g_train.add_argument("--cache-size", type=int, default=50000,
+                         help="Per-worker LRU frame cache size (0 disables cache)")
+    g_train.add_argument("--compile", action="store_true",
+                         help="Use torch.compile(model) when available (PyTorch 2+)")
 
     g_filter = parser.add_argument_group("Legacy filtering (unused when align-tamformer)")
     g_filter.add_argument("--frame-keep-mod", type=int, default=1,
@@ -207,6 +214,8 @@ class PreventionClipsFromFrames(Dataset):
 
         self.frames_root = frames_root
         self.args = args
+        self.cache_size = max(0, int(getattr(args, "cache_size", 0)))
+        self._frame_cache: "OrderedDict[str, np.ndarray]" = OrderedDict()
         window = int(args.clip_len)
         stride = max(1, int(args.chunk_stride))
 
@@ -273,13 +282,28 @@ class PreventionClipsFromFrames(Dataset):
     def __len__(self):
         return len(self.samples)
 
+    def _get_frame(self, path: str):
+        if self.cache_size <= 0:
+            return load_img(path)
+        cached = self._frame_cache.get(path)
+        if cached is not None:
+            self._frame_cache.move_to_end(path, last=True)
+            return cached
+        img = load_img(path)
+        if img is None:
+            return None
+        self._frame_cache[path] = img
+        if len(self._frame_cache) > self.cache_size:
+            self._frame_cache.popitem(last=False)
+        return img
+
     def __getitem__(self, idx):
         s = self.samples[idx]
         pad = self.args.crop_pad
         sz = self.args.input_size
         frames = []
         for fm in s["frames"]:
-            img = load_img(fm["path"])
+            img = self._get_frame(fm["path"])
             if img is None:
                 raise FileNotFoundError(f"Frame missing at runtime: {fm['path']}")
             x, y, w, h = fm["bbox"]
@@ -330,10 +354,13 @@ def train_one_epoch(model, loader, opt, device):
     ce = nn.CrossEntropyLoss()
     scaler = make_scaler(device)
     total = 0.0
+    n_batches = len(loader)
+    start = time.perf_counter()
 
     pbar = tqdm(loader, leave=False, desc="Training")
     for x, y in pbar:
-        x, y = x.to(device), y.to(device)
+        x = x.to(device, non_blocking=True)
+        y = y.to(device, non_blocking=True)
         opt.zero_grad(set_to_none=True)
         with autocast_ctx(device):
             loss = ce(model(x), y)
@@ -343,24 +370,32 @@ def train_one_epoch(model, loader, opt, device):
         total += loss.item() * x.size(0)
         pbar.set_postfix({"loss": f"{loss.item():.4f}"})
 
-    return total / len(loader.dataset)
+    elapsed = max(1e-9, time.perf_counter() - start)
+    sec_per_batch = elapsed / max(1, n_batches)
+    samples_per_sec = len(loader.dataset) / elapsed
+    return total / len(loader.dataset), sec_per_batch, samples_per_sec
 
 
 @torch.no_grad()
-def evaluate(model, loader, device, num_classes: int = NUM_MOTION_CLASSES):
+def evaluate(model, loader, device, criterion=None, num_classes: int = NUM_MOTION_CLASSES, desc: str = "Evaluating"):
     model.eval()
     y_true, y_pred, y_scores = [], [], []
+    total_loss = 0.0
 
-    for x, y in tqdm(loader, leave=False, desc="Evaluating"):
+    for x, y in tqdm(loader, leave=False, desc=desc):
+        x = x.to(device, non_blocking=True)
+        y = y.to(device, non_blocking=True)
         with autocast_ctx(device):
-            logits = model(x.to(device))
+            logits = model(x)
+            if criterion is not None:
+                total_loss += criterion(logits, y).item() * x.size(0)
         probs = torch.softmax(logits, dim=1).cpu().numpy()
         y_scores.append(probs)
         y_pred.extend(logits.argmax(1).cpu().tolist())
         y_true.extend(y.tolist())
 
     if not y_true:
-        return 0.0, {}
+        return 0.0, {}, 0.0
 
     y_true = np.asarray(y_true, dtype=int)
     y_pred = np.asarray(y_pred, dtype=int)
@@ -389,7 +424,8 @@ def evaluate(model, loader, device, num_classes: int = NUM_MOTION_CLASSES):
         "y_pred": y_pred,
         "y_scores": y_scores,
     }
-    return acc, metrics
+    avg_loss = total_loss / max(1, len(loader.dataset))
+    return acc, metrics, avg_loss
 
 
 def motion_metrics_line(metrics: dict, header: str = "motion") -> str:
@@ -455,6 +491,9 @@ def main():
     print(f"  lr           : {args.lr}")
     print(f"  epochs       : {args.epochs}")
     print(f"  patience     : {args.patience}")
+    print(f"  prefetch     : {args.prefetch_factor}")
+    print(f"  cache_size   : {args.cache_size}")
+    print(f"  compile      : {args.compile}")
     print(f"  results_dir  : {results_dir}")
     print("=" * 60)
 
@@ -474,6 +513,9 @@ def main():
             f"epochs: {args.epochs}",
             f"patience: {args.patience}",
             f"seed: {args.seed}",
+            f"prefetch_factor: {args.prefetch_factor}",
+            f"cache_size: {args.cache_size}",
+            f"compile: {args.compile}",
             f"device: pending",
         ],
     )
@@ -494,8 +536,8 @@ def main():
     append_epoch_line(train_log_file, "-" * 72)
     append_epoch_line(
         train_log_file,
-        "{:>5}  {:>12}  {:>12}  {:>10}  {}".format(
-            "epoch", "train_loss", "val_loss", "val_acc", "notes",
+        "{:>5}  {:>12}  {:>12}  {:>10}  {:>10}  {:>10}  {}".format(
+            "epoch", "train_loss", "val_loss", "val_acc", "sec/batch", "samp/sec", "notes",
         ),
     )
 
@@ -504,6 +546,9 @@ def main():
         num_workers=args.num_workers,
         pin_memory=True,
     )
+    if args.num_workers > 0:
+        loader_kw["persistent_workers"] = True
+        loader_kw["prefetch_factor"] = max(2, int(args.prefetch_factor))
 
     if args.weighted_sampler:
         sampler = build_train_sampler(train_set)
@@ -515,6 +560,18 @@ def main():
     test_loader = DataLoader(test_set, shuffle=False, **loader_kw)
 
     model = make_model().to(device)
+    if args.compile:
+        if hasattr(torch, "compile"):
+            try:
+                model = torch.compile(model)
+                print("torch.compile enabled.")
+                append_epoch_line(train_log_file, "torch.compile: enabled")
+            except Exception as exc:
+                print("torch.compile failed, continuing without compile:", exc)
+                append_epoch_line(train_log_file, f"torch.compile: failed ({exc})")
+        else:
+            print("torch.compile not available in this PyTorch version.")
+            append_epoch_line(train_log_file, "torch.compile: unavailable")
     opt = torch.optim.Adam(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay
     )
@@ -525,17 +582,14 @@ def main():
     print("\nStarting training…")
     for epoch in range(1, args.epochs + 1):
         print(f"\nEpoch {epoch}/{args.epochs}")
-        train_loss = train_one_epoch(model, train_loader, opt, device)
-
-        model.eval()
-        val_loss = 0.0
-        with torch.no_grad():
-            for x, y in val_loader:
-                x, y = x.to(device), y.to(device)
-                val_loss += ce(model(x), y).item() * x.size(0)
-        val_loss /= max(1, len(val_set))
-
-        val_acc, val_metrics = evaluate(model, val_loader, device)
+        train_loss, sec_per_batch, samples_per_sec = train_one_epoch(model, train_loader, opt, device)
+        val_acc, val_metrics, val_loss = evaluate(
+            model,
+            val_loader,
+            device,
+            criterion=ce,
+            desc="Validating",
+        )
         print(f"Train Loss: {train_loss:.4f}  |  Val Loss: {val_loss:.4f}  |  Val Acc: {val_acc:.3f}")
         print_motion_metrics(val_metrics, header="val motion")
 
@@ -562,8 +616,8 @@ def main():
                 notes = "early stop"
                 append_epoch_line(
                     train_log_file,
-                    "{:>5}  {:>12.6f}  {:>12.6f}  {:>10.4f}  {}".format(
-                        epoch, train_loss, val_loss, val_acc, notes,
+                    "{:>5}  {:>12.6f}  {:>12.6f}  {:>10.4f}  {:>10.4f}  {:>10.2f}  {}".format(
+                        epoch, train_loss, val_loss, val_acc, sec_per_batch, samples_per_sec, notes,
                     ),
                 )
                 append_epoch_line(train_log_file, motion_metrics_line(val_metrics, "val motion"))
@@ -571,8 +625,8 @@ def main():
 
         append_epoch_line(
             train_log_file,
-            "{:>5}  {:>12.6f}  {:>12.6f}  {:>10.4f}  {}".format(
-                epoch, train_loss, val_loss, val_acc, notes,
+            "{:>5}  {:>12.6f}  {:>12.6f}  {:>10.4f}  {:>10.4f}  {:>10.2f}  {}".format(
+                epoch, train_loss, val_loss, val_acc, sec_per_batch, samples_per_sec, notes,
             ),
         )
         append_epoch_line(train_log_file, motion_metrics_line(val_metrics, "val motion"))
@@ -580,7 +634,7 @@ def main():
     print("\nTraining done — loading best model for test…")
     ckpt = torch.load(best_model_path, map_location=device)
     model.load_state_dict(ckpt["model"])
-    test_acc, test_metrics = evaluate(model, test_loader, device)
+    test_acc, test_metrics, _ = evaluate(model, test_loader, device, desc="Testing")
 
     print(f"\n{'=' * 60}")
     print("TEST (compare to TAMformer motion head):")
