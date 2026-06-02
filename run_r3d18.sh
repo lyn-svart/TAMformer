@@ -20,7 +20,7 @@ set -euo pipefail
 SOURCE="${1:-${SOURCE:-/path/to/PreventionData}}"
 
 SAVE_DIR="${SAVE_DIR:-}"
-RESULTS_DIR="${RESULTS_DIR:-}"                  # empty → <save-dir>/results
+RESULTS_DIR="${RESULTS_DIR:-}"                  # empty → TAMformer/ (folder with r3d18.py)
 FRAMES_ROOT="${FRAMES_ROOT:-}"                  # empty → same as SOURCE
 
 TRAIN_JSON="${TRAIN_JSON:-}"
@@ -60,7 +60,7 @@ echo "============================================================"
 echo "  SOURCE         : $SOURCE"
 echo "  FRAMES_ROOT    : ${FRAMES_ROOT:-<same as SOURCE>}"
 echo "  SAVE_DIR       : ${SAVE_DIR:-<auto>}"
-echo "  RESULTS_DIR    : ${RESULTS_DIR:-<save-dir>/results>}"
+echo "  RESULTS_DIR    : ${RESULTS_DIR:-<repo folder with r3d18.py>}"
 echo "  CLIP_LEN (T)   : $CLIP_LEN"
 echo "  CHUNK_STRIDE   : $CHUNK_STRIDE"
 echo "  INPUT_SIZE     : $INPUT_SIZE"

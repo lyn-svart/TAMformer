@@ -39,7 +39,6 @@ from motion_labels import (
     motion_to_class,
 )
 from result_logging import (
-    default_results_dir,
     format_motion_metrics_line,
     format_per_class_metrics,
     test_log_path,
@@ -57,6 +56,9 @@ PAT = re.compile(
 
 torch.backends.cudnn.benchmark = True
 
+# Directory containing this script (default location for training_results.txt)
+CODE_DIR = Path(__file__).resolve().parent
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -73,7 +75,7 @@ def parse_args():
                          help="Checkpoints dir (default: <source>/../checkpoints)")
     g_paths.add_argument("--results-dir", default=None,
                          help="Directory for training_results.txt and test_results.txt "
-                              "(default: <save-dir>/results)")
+                              "(default: folder containing r3d18.py)")
     g_paths.add_argument("--train-json", default=None)
     g_paths.add_argument("--val-json", default=None)
     g_paths.add_argument("--test-json", default=None)
@@ -538,7 +540,11 @@ def main():
     test_json = args.test_json or os.path.join(source, "Test.json")
 
     os.makedirs(save_dir, exist_ok=True)
-    results_dir = args.results_dir or default_results_dir(save_dir)
+    if args.results_dir:
+        results_dir = args.results_dir
+        os.makedirs(results_dir, exist_ok=True)
+    else:
+        results_dir = str(CODE_DIR)
     train_log_file = os.path.abspath(training_log_path(results_dir))
     test_log_file = os.path.abspath(test_log_path(results_dir))
     best_model_path = os.path.join(save_dir, "best_r3d18.pt")

@@ -49,14 +49,17 @@ Logs are written under the results directory (created at startup):
 
 | File | R3D-18 | TAMformer |
 |------|--------|-----------|
-| Training | `<save-dir>/results/training_results.txt` | `<results_log_dir>/training_results.txt` |
-| Test | `<save-dir>/results/test_results.txt` | `<results_log_dir>/test_results.txt` |
+| Training | `<repo>/training_results.txt` (default) | `<results_log_dir>/training_results.txt` |
+| Test | `<repo>/test_results.txt` (default) | `<results_log_dir>/test_results.txt` |
 
-Default on server (if `SOURCE` is `.../PreventionData`):
+Default (next to the code):
 
 ```text
-.../02-Source/checkpoints/results/training_results.txt
+.../TAMformer/training_results.txt
+.../TAMformer/test_results.txt
 ```
+
+Checkpoints still go to `<SOURCE>/../checkpoints/best_r3d18.pt` unless you set `SAVE_DIR`.
 
 The startup banner prints the **absolute path** as `training_log`. Watch it live:
 
