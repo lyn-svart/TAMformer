@@ -22,10 +22,13 @@ def test_log_path(results_dir: str) -> str:
 
 
 def _write_lines(path: str, lines: Iterable[str], mode: str = "w") -> None:
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     with open(path, mode, encoding="utf-8") as f:
         for line in lines:
             f.write(line.rstrip() + "\n")
+        f.flush()
 
 
 def write_run_header(path: str, title: str, config_lines: List[str]) -> None:
@@ -41,6 +44,11 @@ def write_run_header(path: str, title: str, config_lines: List[str]) -> None:
 
 def append_epoch_line(path: str, line: str) -> None:
     _write_lines(path, [line], mode="a")
+
+
+def append_progress_line(path: str, line: str) -> None:
+    """Mid-epoch / dataset-build progress (same file, flushed immediately)."""
+    append_epoch_line(path, line)
 
 
 def write_keras_training_history(path: str, history) -> None:

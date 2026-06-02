@@ -44,6 +44,8 @@ WORKERS="${WORKERS:-8}"
 PREFETCH_FACTOR="${PREFETCH_FACTOR:-4}"
 CACHE_SIZE="${CACHE_SIZE:-50000}"
 COMPILE="${COMPILE:-}"
+LOG_EVERY_N_BATCHES="${LOG_EVERY_N_BATCHES:-50}"
+MAX_TRAIN_BATCHES="${MAX_TRAIN_BATCHES:-0}"
 SEED="${SEED:-42}"
 FRAME_KEEP_MOD="${FRAME_KEEP_MOD:-1}"           # legacy CLI; sliding windows use consecutive frames
 
@@ -71,6 +73,8 @@ echo "  WORKERS        : $WORKERS"
 echo "  PREFETCH       : $PREFETCH_FACTOR"
 echo "  CACHE_SIZE     : $CACHE_SIZE"
 echo "  COMPILE        : ${COMPILE:-off}"
+echo "  LOG_EVERY      : $LOG_EVERY_N_BATCHES batches"
+echo "  MAX_BATCHES    : ${MAX_TRAIN_BATCHES:-0 (full epoch)}"
 echo "  SEED           : $SEED"
 echo "============================================================"
 echo ""
@@ -100,6 +104,8 @@ $PYTHON "$SCRIPT_DIR/r3d18.py" \
     --num-workers    "$WORKERS"       \
     --prefetch-factor "$PREFETCH_FACTOR" \
     --cache-size     "$CACHE_SIZE"    \
+    --log-every-n-batches "$LOG_EVERY_N_BATCHES" \
+    --max-train-batches   "$MAX_TRAIN_BATCHES" \
     --seed           "$SEED"          \
     --frame-keep-mod "$FRAME_KEEP_MOD" \
     $EXTRA_FLAGS

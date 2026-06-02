@@ -45,29 +45,64 @@ Checkpoints: `<SOURCE>/../checkpoints/best_r3d18.pt` (or `SAVE_DIR`).
 
 ## Result logs (txt)
 
-After each run, metrics are written under the results directory:
+Logs are written under the results directory (created at startup):
 
 | File | R3D-18 | TAMformer |
 |------|--------|-----------|
 | Training | `<save-dir>/results/training_results.txt` | `<results_log_dir>/training_results.txt` |
 | Test | `<save-dir>/results/test_results.txt` | `<results_log_dir>/test_results.txt` |
 
+Default on server (if `SOURCE` is `.../PreventionData`):
+
+```text
+.../02-Source/checkpoints/results/training_results.txt
+```
+
+The startup banner prints the **absolute path** as `training_log`. Watch it live:
+
+```bash
+tail -f /path/to/checkpoints/results/training_results.txt
+```
+
 Override R3D: `RESULTS_DIR=/path/to/logs bash run_r3d18.sh`  
 TAMformer: set `model_opts.results_log_dir` in the YAML (default `./models_motion_location/results`).
 
-## Diagnose epoch duration from logs
+### Mid-epoch progress lines
 
-In `training_results.txt`, use:
+Every `LOG_EVERY_N_BATCHES` (default 50) during training:
 
-- `samples train/val/test: X/Y/Z` for dataset scale
-- per-epoch `sec/batch` and `samp/sec` columns for throughput
+```text
+epoch=1 step=50/5033 sec/batch=10.20 samp/sec=6.27 loss=1.12
+```
 
-Quick estimate:
+You do **not** need to finish an epoch to estimate speed.
+
+### Quick benchmark (minutes, not hours)
+
+```bash
+SOURCE=/path/to/PreventionData \
+FRACTION=0.05 EPOCHS=1 CHUNK_STRIDE=4 \
+BATCH=64 WORKERS=8 PREFETCH_FACTOR=2 CACHE_SIZE=64 \
+MAX_TRAIN_BATCHES=200 LOG_EVERY_N_BATCHES=20 \
+bash run_r3d18.sh
+```
+
+Then read `sec/batch` from the log and estimate:
 
 ```text
 steps_per_epoch ~= ceil(train_samples / BATCH)
 epoch_seconds ~= steps_per_epoch * sec_per_batch
 ```
+
+## Diagnose epoch duration from logs
+
+In `training_results.txt`, use:
+
+- `building train...` / `train samples: N` (appears as each split loads)
+- `samples train/val/test: X/Y/Z` for dataset scale
+- `train steps/epoch (approx): ...`
+- mid-epoch `sec/batch` and `samp/sec` lines (every N batches)
+- end-of-epoch summary columns (`epoch`, `train_loss`, `val_loss`, ...)
 
 If `train_samples` is very large and `sec/batch` is high, training is data-loader bound.
 

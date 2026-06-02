@@ -47,6 +47,7 @@ from result_logging import (
     write_run_header,
     write_test_results,
     append_epoch_line,
+    append_progress_line,
 )
 
 PAT = re.compile(
@@ -105,6 +106,10 @@ def parse_args():
                          help="Per-worker LRU frame cache size (0 disables cache)")
     g_train.add_argument("--compile", action="store_true",
                          help="Use torch.compile(model) when available (PyTorch 2+)")
+    g_train.add_argument("--log-every-n-batches", type=int, default=50,
+                         help="Append throughput to training_results.txt every N batches (0=off)")
+    g_train.add_argument("--max-train-batches", type=int, default=0,
+                         help="Stop each train epoch after N batches (0=full epoch; for benchmarks)")
 
     g_filter = parser.add_argument_group("Legacy filtering (unused when align-tamformer)")
     g_filter.add_argument("--frame-keep-mod", type=int, default=1,
@@ -349,16 +354,35 @@ def autocast_ctx(device: str, enabled: bool = True):
         return torch.cuda.amp.autocast(enabled=enabled and (device == "cuda"))
 
 
-def train_one_epoch(model, loader, opt, device):
+def train_one_epoch(
+    model,
+    loader,
+    opt,
+    device,
+    epoch=1,
+    log_file=None,
+    log_every_n_batches=0,
+    max_train_batches=0,
+):
     model.train()
     ce = nn.CrossEntropyLoss()
     scaler = make_scaler(device)
     total = 0.0
-    n_batches = len(loader)
+    n_samples = 0
+    n_batches_total = len(loader)
+    n_batches_target = (
+        min(n_batches_total, max_train_batches) if max_train_batches > 0 else n_batches_total
+    )
     start = time.perf_counter()
+    interval_start = start
+    interval_samples = 0
+    batch_idx = 0
 
-    pbar = tqdm(loader, leave=False, desc="Training")
-    for x, y in pbar:
+    pbar = tqdm(loader, leave=False, desc="Training", total=n_batches_target)
+    for batch_idx, (x, y) in enumerate(pbar, start=1):
+        if max_train_batches > 0 and batch_idx > max_train_batches:
+            break
+
         x = x.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
         opt.zero_grad(set_to_none=True)
@@ -367,13 +391,57 @@ def train_one_epoch(model, loader, opt, device):
         scaler.scale(loss).backward()
         scaler.step(opt)
         scaler.update()
-        total += loss.item() * x.size(0)
+        batch_n = x.size(0)
+        total += loss.item() * batch_n
+        n_samples += batch_n
+        interval_samples += batch_n
         pbar.set_postfix({"loss": f"{loss.item():.4f}"})
 
+        if (
+            log_file
+            and log_every_n_batches > 0
+            and batch_idx % log_every_n_batches == 0
+        ):
+            interval_elapsed = max(1e-9, time.perf_counter() - interval_start)
+            sec_per_batch = interval_elapsed / log_every_n_batches
+            samp_sec = interval_samples / interval_elapsed
+            append_progress_line(
+                log_file,
+                "epoch={} step={}/{} sec/batch={:.2f} samp/sec={:.2f} loss={:.4f}".format(
+                    epoch,
+                    batch_idx,
+                    n_batches_target,
+                    sec_per_batch,
+                    samp_sec,
+                    loss.item(),
+                ),
+            )
+            interval_start = time.perf_counter()
+            interval_samples = 0
+
     elapsed = max(1e-9, time.perf_counter() - start)
-    sec_per_batch = elapsed / max(1, n_batches)
-    samples_per_sec = len(loader.dataset) / elapsed
-    return total / len(loader.dataset), sec_per_batch, samples_per_sec
+    if batch_idx == 0:
+        return 0.0, 0.0, 0.0
+
+    n_batches_done = batch_idx
+    sec_per_batch = elapsed / n_batches_done
+    samples_per_sec = n_samples / elapsed
+    avg_loss = total / max(1, n_samples)
+
+    if log_file and log_every_n_batches > 0:
+        append_progress_line(
+            log_file,
+            "epoch={} step={}/{} END-TRAIN sec/batch={:.2f} samp/sec={:.2f} avg_loss={:.4f}".format(
+                epoch,
+                n_batches_done,
+                n_batches_target,
+                sec_per_batch,
+                samples_per_sec,
+                avg_loss,
+            ),
+        )
+
+    return avg_loss, sec_per_batch, samples_per_sec
 
 
 @torch.no_grad()
@@ -471,8 +539,8 @@ def main():
 
     os.makedirs(save_dir, exist_ok=True)
     results_dir = args.results_dir or default_results_dir(save_dir)
-    train_log_file = training_log_path(results_dir)
-    test_log_file = test_log_path(results_dir)
+    train_log_file = os.path.abspath(training_log_path(results_dir))
+    test_log_file = os.path.abspath(test_log_path(results_dir))
     best_model_path = os.path.join(save_dir, "best_r3d18.pt")
 
     assert Path(source).exists(), f"--source not found: {source}"
@@ -495,6 +563,8 @@ def main():
     print(f"  cache_size   : {args.cache_size}")
     print(f"  compile      : {args.compile}")
     print(f"  results_dir  : {results_dir}")
+    print(f"  training_log : {train_log_file}")
+    print(f"  test_log     : {test_log_file}")
     print("=" * 60)
 
     write_run_header(
@@ -516,21 +586,42 @@ def main():
             f"prefetch_factor: {args.prefetch_factor}",
             f"cache_size: {args.cache_size}",
             f"compile: {args.compile}",
+            f"log_every_n_batches: {args.log_every_n_batches}",
+            f"max_train_batches: {args.max_train_batches}",
             f"device: pending",
         ],
     )
+    print("Training log (created now):", train_log_file)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")
     append_epoch_line(train_log_file, f"device: {device}")
 
+    append_progress_line(train_log_file, "building train...")
     train_set = PreventionClipsFromFrames(train_json, frames_root, args, args.use_fraction)
+    append_progress_line(train_log_file, "train samples: {}".format(len(train_set)))
+
+    append_progress_line(train_log_file, "building val...")
     val_set = PreventionClipsFromFrames(val_json, frames_root, args, args.use_fraction)
+    append_progress_line(train_log_file, "val samples: {}".format(len(val_set)))
+
+    append_progress_line(train_log_file, "building test...")
     test_set = PreventionClipsFromFrames(test_json, frames_root, args, args.use_fraction)
+    append_progress_line(train_log_file, "test samples: {}".format(len(test_set)))
+
     append_epoch_line(
         train_log_file,
         "samples train/val/test: {}/{}/{}".format(
             len(train_set), len(val_set), len(test_set),
+        ),
+    )
+    steps_per_epoch = (len(train_set) + args.batch_size - 1) // args.batch_size
+    if args.max_train_batches > 0:
+        steps_per_epoch = min(steps_per_epoch, args.max_train_batches)
+    append_progress_line(
+        train_log_file,
+        "train steps/epoch (approx): {} (batch_size={})".format(
+            steps_per_epoch, args.batch_size,
         ),
     )
     append_epoch_line(train_log_file, "-" * 72)
@@ -582,7 +673,16 @@ def main():
     print("\nStarting training…")
     for epoch in range(1, args.epochs + 1):
         print(f"\nEpoch {epoch}/{args.epochs}")
-        train_loss, sec_per_batch, samples_per_sec = train_one_epoch(model, train_loader, opt, device)
+        train_loss, sec_per_batch, samples_per_sec = train_one_epoch(
+            model,
+            train_loader,
+            opt,
+            device,
+            epoch=epoch,
+            log_file=train_log_file,
+            log_every_n_batches=args.log_every_n_batches,
+            max_train_batches=args.max_train_batches,
+        )
         val_acc, val_metrics, val_loss = evaluate(
             model,
             val_loader,
