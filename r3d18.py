@@ -13,6 +13,7 @@ import json
 import random
 import argparse
 import time
+from functools import partial
 import cv2
 import numpy as np
 from pathlib import Path
@@ -124,6 +125,12 @@ def parse_args():
                          help="Append throughput to training_results.txt every N batches (0=off)")
     g_train.add_argument("--max-train-batches", type=int, default=0,
                          help="Stop each train epoch after N batches (0=full epoch; for benchmarks)")
+    g_train.add_argument(
+        "--no-dedupe-frame-reads",
+        action="store_true",
+        help="Old loader: each sample reads frames in workers. Default: one read per "
+             "unique frame path per batch (collate), then crop all boxes.",
+    )
 
     g_filter = parser.add_argument_group("Legacy filtering (unused when align-tamformer)")
     g_filter.add_argument("--frame-keep-mod", type=int, default=1,
@@ -228,6 +235,115 @@ def resize_full_frame(img, input_size: int):
     return cv2.resize(img, (input_size, input_size))
 
 
+def normalize_clip_hwc(frames_hwc: np.ndarray) -> np.ndarray:
+    """frames_hwc: (T, H, W, 3) float-ready uint8/float from crops."""
+    clip = frames_hwc.astype(np.float32) / 255.0
+    mean = np.array([0.45, 0.45, 0.45], dtype=np.float32)
+    std = np.array([0.225, 0.225, 0.225], dtype=np.float32)
+    clip = (clip - mean) / std
+    return np.transpose(clip, (3, 0, 1, 2))
+
+
+def load_unique_frames(paths: List[str]) -> Dict[str, np.ndarray]:
+    """Read each path at most once."""
+    cache: Dict[str, np.ndarray] = {}
+    for path in paths:
+        if path in cache:
+            continue
+        img = load_img(path)
+        if img is None:
+            raise FileNotFoundError(f"Frame missing at runtime: {path}")
+        cache[path] = img
+    return cache
+
+
+def build_clip_from_frames_meta(
+    frames_meta: List[Dict],
+    frame_cache: Dict[str, np.ndarray],
+    args,
+) -> np.ndarray:
+    """Return clip array (C, T, H, W)."""
+    pad = args.crop_pad
+    sz = args.input_size
+    skip_crop = bool(getattr(args, "skip_crop_resize", False))
+    crops = []
+    for fm in frames_meta:
+        img = frame_cache[fm["path"]]
+        if skip_crop:
+            crops.append(resize_full_frame(img, sz))
+        else:
+            x, y, w, h = fm["bbox"]
+            crops.append(safe_crop(img, x, y, w, h, pad=pad, input_size=sz))
+    return normalize_clip_hwc(np.stack(crops, axis=0))
+
+
+class CollateStats:
+    """Updated each collate call (for logging unique imreads per batch)."""
+
+    def __init__(self):
+        self.last_unique_reads = 0
+        self.last_total_frame_refs = 0
+
+
+def collate_clips_batch(batch: List[Dict], args, stats: Optional[CollateStats] = None):
+    """
+    Batch-level frame dedupe (teacher's idea): collect unique paths in the batch,
+    imread each once, crop all tracks/windows from cache.
+    """
+    if getattr(args, "benchmark_dummy_read", False):
+        unique_paths = []
+        seen = set()
+        total_refs = 0
+        for sample in batch:
+            for fm in sample["frames"]:
+                total_refs += 1
+                if fm["path"] not in seen:
+                    seen.add(fm["path"])
+                    unique_paths.append(fm["path"])
+        load_unique_frames(unique_paths)
+        t = int(args.clip_len)
+        sz = int(args.input_size)
+        clips = [np.zeros((3, t, sz, sz), dtype=np.float32) for _ in batch]
+        labels = [int(s["label"]) for s in batch]
+        if stats is not None:
+            stats.last_unique_reads = len(unique_paths)
+            stats.last_total_frame_refs = total_refs
+        x = torch.from_numpy(np.stack(clips, axis=0))
+        y = torch.tensor(labels, dtype=torch.long)
+        return x, y
+
+    unique_paths = []
+    seen = set()
+    total_refs = 0
+    for sample in batch:
+        for fm in sample["frames"]:
+            total_refs += 1
+            p = fm["path"]
+            if p not in seen:
+                seen.add(p)
+                unique_paths.append(p)
+
+    frame_cache = load_unique_frames(unique_paths)
+
+    clips = [
+        build_clip_from_frames_meta(sample["frames"], frame_cache, args)
+        for sample in batch
+    ]
+    labels = [int(s["label"]) for s in batch]
+
+    if stats is not None:
+        stats.last_unique_reads = len(unique_paths)
+        stats.last_total_frame_refs = total_refs
+
+    x = torch.from_numpy(np.stack(clips, axis=0).astype(np.float32))
+    y = torch.tensor(labels, dtype=torch.long)
+    return x, y
+
+
+def make_collate_fn(args, stats: Optional[CollateStats] = None):
+    return partial(collate_clips_batch, args=args, stats=stats)
+
+
 class PreventionClipsFromFrames(Dataset):
     """Track-centric sliding windows (TrackJSONAdapter chunk_dt semantics)."""
 
@@ -312,6 +428,11 @@ class PreventionClipsFromFrames(Dataset):
                 "WARNING: --skip-crop-resize enabled (full-frame resize only; "
                 "for throughput benchmarks, not fair R3D/TAMformer comparison)."
             )
+        elif not getattr(self.args, "no_dedupe_frame_reads", False):
+            print(
+                "Frame dedupe enabled: each batch reads every unique frame path once, "
+                "then crops all boxes (collate_fn)."
+            )
 
     def __len__(self):
         return len(self.samples)
@@ -340,6 +461,9 @@ class PreventionClipsFromFrames(Dataset):
 
     def __getitem__(self, idx):
         s = self.samples[idx]
+        if not getattr(self.args, "no_dedupe_frame_reads", False):
+            return s
+
         label = s["label"]
 
         if getattr(self.args, "benchmark_dummy_read", False):
@@ -363,12 +487,7 @@ class PreventionClipsFromFrames(Dataset):
                 x, y, w, h = fm["bbox"]
                 frames.append(safe_crop(img, x, y, w, h, pad=pad, input_size=sz))
 
-        clip = np.stack(frames, axis=0).astype(np.float32) / 255.0
-        mean = np.array([0.45, 0.45, 0.45], dtype=np.float32)
-        std = np.array([0.225, 0.225, 0.225], dtype=np.float32)
-        clip = (clip - mean) / std
-        clip = np.transpose(clip, (3, 0, 1, 2))
-        return torch.from_numpy(clip), label
+        return torch.from_numpy(normalize_clip_hwc(np.stack(frames, axis=0))), label
 
 
 def make_model(num_classes: int = NUM_MOTION_CLASSES) -> nn.Module:
@@ -412,6 +531,7 @@ def train_one_epoch(
     log_file=None,
     log_every_n_batches=0,
     max_train_batches=0,
+    collate_stats: Optional[CollateStats] = None,
 ):
     model.train()
     ce = nn.CrossEntropyLoss()
@@ -454,17 +574,20 @@ def train_one_epoch(
             interval_elapsed = max(1e-9, time.perf_counter() - interval_start)
             sec_per_batch = interval_elapsed / log_every_n_batches
             samp_sec = interval_samples / interval_elapsed
-            append_progress_line(
-                log_file,
-                "epoch={} step={}/{} sec/batch={:.2f} samp/sec={:.2f} loss={:.4f}".format(
-                    epoch,
-                    batch_idx,
-                    n_batches_target,
-                    sec_per_batch,
-                    samp_sec,
-                    loss.item(),
-                ),
+            line = "epoch={} step={}/{} sec/batch={:.2f} samp/sec={:.2f} loss={:.4f}".format(
+                epoch,
+                batch_idx,
+                n_batches_target,
+                sec_per_batch,
+                samp_sec,
+                loss.item(),
             )
+            if collate_stats is not None:
+                line += " unique_frames={}/{}".format(
+                    collate_stats.last_unique_reads,
+                    collate_stats.last_total_frame_refs,
+                )
+            append_progress_line(log_file, line)
             interval_start = time.perf_counter()
             interval_samples = 0
 
@@ -615,6 +738,7 @@ def main():
     print(f"  chunk_stride : {args.chunk_stride}")
     print(f"  skip_crop    : {args.skip_crop_resize}")
     print(f"  dummy_read   : {args.benchmark_dummy_read}")
+    print(f"  dedupe_reads : {not args.no_dedupe_frame_reads}")
     print(f"  num_classes  : {NUM_MOTION_CLASSES}")
     print(f"  batch_size   : {args.batch_size}")
     print(f"  lr           : {args.lr}")
@@ -641,6 +765,7 @@ def main():
             f"chunk_stride: {args.chunk_stride}",
             f"skip_crop_resize: {args.skip_crop_resize}",
             f"benchmark_dummy_read: {args.benchmark_dummy_read}",
+            f"dedupe_frame_reads: {not args.no_dedupe_frame_reads}",
             f"batch_size: {args.batch_size}",
             f"lr: {args.lr}",
             f"epochs: {args.epochs}",
@@ -695,10 +820,22 @@ def main():
         ),
     )
 
+    collate_stats = CollateStats()
+    if args.no_dedupe_frame_reads:
+        collate_fn = None
+        print("Loader: per-sample frame reads in workers (--no-dedupe-frame-reads).")
+    else:
+        collate_fn = make_collate_fn(args, collate_stats)
+        print(
+            "Loader: batch frame dedupe (one imread per unique path per batch, "
+            "then crop all boxes)."
+        )
+
     loader_kw = dict(
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         pin_memory=True,
+        collate_fn=collate_fn,
     )
     if args.num_workers > 0:
         loader_kw["persistent_workers"] = True
@@ -745,6 +882,7 @@ def main():
             log_file=train_log_file,
             log_every_n_batches=args.log_every_n_batches,
             max_train_batches=args.max_train_batches,
+            collate_stats=collate_stats if not args.no_dedupe_frame_reads else None,
         )
         val_acc, val_metrics, val_loss = evaluate(
             model,

@@ -159,3 +159,21 @@ TAMformer dual-head run prints **motion** metrics in that format; ignore locatio
 | Class weights | off (`apply_class_weights: false`) | off (plain CE) |
 
 Sampling: both use **chunk_dt / clip_len = 10** sliding windows per track, label = **last frame** in the window.
+
+## Frame dedupe per batch (default)
+
+Each batch:
+
+1. Collect all frame paths needed by the 64 clips (~640 refs with T=10).
+2. **`imread` each unique path once** (often far fewer than 640).
+3. Crop every bbox / track from that in-memory image.
+
+Enabled by default. Logs show `unique_frames=U/T` in mid-epoch lines (`U` unique reads, `T` total frame slots).
+
+Disable (old slow path):
+
+```bash
+NO_DEDUPE_FRAME_READS=1 bash run_r3d18.sh
+```
+
+Works best with `num_workers` > 0: workers return lightweight metadata; **collate** runs dedupe in the main process.
