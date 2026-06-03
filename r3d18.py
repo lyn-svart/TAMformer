@@ -94,6 +94,12 @@ def parse_args():
         help="Benchmark only: skip bbox crop+pad; resize full frame to --input-size "
              "(not comparable to TAMformer/R3D bbox baseline)",
     )
+    g_clip.add_argument(
+        "--benchmark-dummy-read",
+        action="store_true",
+        help="Benchmark only: read/decode each frame from disk but feed zeros (3,T,H,W) "
+             "to the model; isolates I/O vs crop/resize/GPU",
+    )
 
     g_train = parser.add_argument_group("Training")
     g_train.add_argument("--batch-size", type=int, default=64)
@@ -296,7 +302,12 @@ class PreventionClipsFromFrames(Dataset):
         label_dist = Counter(s["label"] for s in self.samples)
         print(f"Final dataset size: {len(self.samples)} samples")
         print(f"Class distribution (ids): {dict(sorted(label_dist.items()))}")
-        if getattr(self.args, "skip_crop_resize", False):
+        if getattr(self.args, "benchmark_dummy_read", False):
+            print(
+                "WARNING: --benchmark-dummy-read enabled (read frames, model gets zeros; "
+                "throughput benchmark only)."
+            )
+        elif getattr(self.args, "skip_crop_resize", False):
             print(
                 "WARNING: --skip-crop-resize enabled (full-frame resize only; "
                 "for throughput benchmarks, not fair R3D/TAMformer comparison)."
@@ -320,8 +331,24 @@ class PreventionClipsFromFrames(Dataset):
             self._frame_cache.popitem(last=False)
         return img
 
+    def _dummy_clip_tensor(self, label: int):
+        """Zeros with correct (C, T, H, W) for R3D-18; labels unchanged (benchmark only)."""
+        t = int(self.args.clip_len)
+        sz = int(self.args.input_size)
+        clip = np.zeros((3, t, sz, sz), dtype=np.float32)
+        return torch.from_numpy(clip), label
+
     def __getitem__(self, idx):
         s = self.samples[idx]
+        label = s["label"]
+
+        if getattr(self.args, "benchmark_dummy_read", False):
+            for fm in s["frames"]:
+                img = self._get_frame(fm["path"])
+                if img is None:
+                    raise FileNotFoundError(f"Frame missing at runtime: {fm['path']}")
+            return self._dummy_clip_tensor(label)
+
         pad = self.args.crop_pad
         sz = self.args.input_size
         skip_crop = bool(getattr(self.args, "skip_crop_resize", False))
@@ -341,7 +368,7 @@ class PreventionClipsFromFrames(Dataset):
         std = np.array([0.225, 0.225, 0.225], dtype=np.float32)
         clip = (clip - mean) / std
         clip = np.transpose(clip, (3, 0, 1, 2))
-        return torch.from_numpy(clip), s["label"]
+        return torch.from_numpy(clip), label
 
 
 def make_model(num_classes: int = NUM_MOTION_CLASSES) -> nn.Module:
@@ -552,6 +579,12 @@ def main():
     args = parse_args()
     set_seed(args.seed)
 
+    if args.benchmark_dummy_read and args.skip_crop_resize:
+        print(
+            "Note: --benchmark-dummy-read ignores --skip-crop-resize "
+            "(frames are read then discarded)."
+        )
+
     source = args.source
     frames_root = args.frames_root or source
     save_dir = args.save_dir or str(Path(source).parent / "checkpoints")
@@ -581,6 +614,7 @@ def main():
     print(f"  clip_len T   : {args.clip_len}")
     print(f"  chunk_stride : {args.chunk_stride}")
     print(f"  skip_crop    : {args.skip_crop_resize}")
+    print(f"  dummy_read   : {args.benchmark_dummy_read}")
     print(f"  num_classes  : {NUM_MOTION_CLASSES}")
     print(f"  batch_size   : {args.batch_size}")
     print(f"  lr           : {args.lr}")
@@ -606,6 +640,7 @@ def main():
             f"clip_len: {args.clip_len}",
             f"chunk_stride: {args.chunk_stride}",
             f"skip_crop_resize: {args.skip_crop_resize}",
+            f"benchmark_dummy_read: {args.benchmark_dummy_read}",
             f"batch_size: {args.batch_size}",
             f"lr: {args.lr}",
             f"epochs: {args.epochs}",

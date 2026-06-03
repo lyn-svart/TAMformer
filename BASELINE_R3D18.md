@@ -93,6 +93,24 @@ Or: `python r3d18.py --source ... --skip-crop-resize ...`
 
 Compare `sec/batch` in `training_results.txt` with and without this flag. **Do not** use for paper numbers vs TAMformer.
 
+### Throughput benchmark: read frames, dummy input to model
+
+Still runs `imread` for every frame in the clip (disk + decode), but the model receives **zeros** `(3, T, 112, 112)` — no crop, no resize, no real pixels.
+
+```bash
+BENCHMARK_DUMMY_READ=1 FRACTION=0.05 MAX_TRAIN_BATCHES=200 LOG_EVERY_N_BATCHES=20 \
+CHUNK_STRIDE=4 BATCH=64 WORKERS=8 CACHE_SIZE=0 bash run_r3d18.sh
+```
+
+Use `CACHE_SIZE=0` if you want every read to hit disk (cache off). With cache on, overlapping windows reuse decoded frames.
+
+Interpretation:
+
+| vs normal ~10 s/batch | Likely bottleneck |
+|----------------------|-------------------|
+| Still slow | Disk decode / I/O |
+| Much faster | Crop+resize (and/or GPU on real data) |
+
 ### Quick benchmark (minutes, not hours)
 
 ```bash

@@ -33,6 +33,7 @@ CHUNK_STRIDE="${CHUNK_STRIDE:-1}"
 CROP_PAD="${CROP_PAD:-0.10}"
 INPUT_SIZE="${INPUT_SIZE:-112}"
 SKIP_CROP_RESIZE="${SKIP_CROP_RESIZE:-}"   # set to 1 for full-frame resize benchmark (no bbox crop)
+BENCHMARK_DUMMY_READ="${BENCHMARK_DUMMY_READ:-}"  # set to 1: read frames, feed zeros to model
 
 # TAMformer motion_location config: batch 64, lr 1e-4, epochs 20, no class weights
 BATCH="${BATCH:-64}"
@@ -66,6 +67,7 @@ echo "  CLIP_LEN (T)   : $CLIP_LEN"
 echo "  CHUNK_STRIDE   : $CHUNK_STRIDE"
 echo "  INPUT_SIZE     : $INPUT_SIZE"
 echo "  SKIP_CROP      : ${SKIP_CROP_RESIZE:-off (bbox crop)}"
+echo "  DUMMY_READ     : ${BENCHMARK_DUMMY_READ:-off}"
 echo "  BATCH_SIZE     : $BATCH"
 echo "  LR             : $LR"
 echo "  EPOCHS         : $EPOCHS"
@@ -91,6 +93,7 @@ EXTRA_FLAGS=""
 [ -n "$WEIGHTED_SAMPLER" ] && EXTRA_FLAGS="$EXTRA_FLAGS --weighted-sampler"
 [ -n "$COMPILE"        ] && EXTRA_FLAGS="$EXTRA_FLAGS --compile"
 [ -n "$SKIP_CROP_RESIZE" ] && EXTRA_FLAGS="$EXTRA_FLAGS --skip-crop-resize"
+[ -n "$BENCHMARK_DUMMY_READ" ] && EXTRA_FLAGS="$EXTRA_FLAGS --benchmark-dummy-read"
 
 $PYTHON "$SCRIPT_DIR/r3d18.py" \
     --source         "$SOURCE"        \
