@@ -88,6 +88,12 @@ def parse_args():
     g_clip.add_argument("--crop-pad", type=float, default=0.10,
                         help="Padding around bbox crop (R3D input; TAMformer uses enlarge_ratio 1.5 @ 224)")
     g_clip.add_argument("--input-size", type=int, default=112)
+    g_clip.add_argument(
+        "--skip-crop-resize",
+        action="store_true",
+        help="Benchmark only: skip bbox crop+pad; resize full frame to --input-size "
+             "(not comparable to TAMformer/R3D bbox baseline)",
+    )
 
     g_train = parser.add_argument_group("Training")
     g_train.add_argument("--batch-size", type=int, default=64)
@@ -211,6 +217,11 @@ def safe_crop(img, x, y, w, h, pad: float, input_size: int):
     return cv2.resize(img[y1:y2, x1:x2], (input_size, input_size))
 
 
+def resize_full_frame(img, input_size: int):
+    """Benchmark path: one resize of the full decoded frame (no bbox crop)."""
+    return cv2.resize(img, (input_size, input_size))
+
+
 class PreventionClipsFromFrames(Dataset):
     """Track-centric sliding windows (TrackJSONAdapter chunk_dt semantics)."""
 
@@ -285,6 +296,11 @@ class PreventionClipsFromFrames(Dataset):
         label_dist = Counter(s["label"] for s in self.samples)
         print(f"Final dataset size: {len(self.samples)} samples")
         print(f"Class distribution (ids): {dict(sorted(label_dist.items()))}")
+        if getattr(self.args, "skip_crop_resize", False):
+            print(
+                "WARNING: --skip-crop-resize enabled (full-frame resize only; "
+                "for throughput benchmarks, not fair R3D/TAMformer comparison)."
+            )
 
     def __len__(self):
         return len(self.samples)
@@ -308,13 +324,17 @@ class PreventionClipsFromFrames(Dataset):
         s = self.samples[idx]
         pad = self.args.crop_pad
         sz = self.args.input_size
+        skip_crop = bool(getattr(self.args, "skip_crop_resize", False))
         frames = []
         for fm in s["frames"]:
             img = self._get_frame(fm["path"])
             if img is None:
                 raise FileNotFoundError(f"Frame missing at runtime: {fm['path']}")
-            x, y, w, h = fm["bbox"]
-            frames.append(safe_crop(img, x, y, w, h, pad=pad, input_size=sz))
+            if skip_crop:
+                frames.append(resize_full_frame(img, sz))
+            else:
+                x, y, w, h = fm["bbox"]
+                frames.append(safe_crop(img, x, y, w, h, pad=pad, input_size=sz))
 
         clip = np.stack(frames, axis=0).astype(np.float32) / 255.0
         mean = np.array([0.45, 0.45, 0.45], dtype=np.float32)
@@ -560,6 +580,7 @@ def main():
     print(f"  save_dir     : {save_dir}")
     print(f"  clip_len T   : {args.clip_len}")
     print(f"  chunk_stride : {args.chunk_stride}")
+    print(f"  skip_crop    : {args.skip_crop_resize}")
     print(f"  num_classes  : {NUM_MOTION_CLASSES}")
     print(f"  batch_size   : {args.batch_size}")
     print(f"  lr           : {args.lr}")
@@ -584,6 +605,7 @@ def main():
             f"test_json: {test_json}",
             f"clip_len: {args.clip_len}",
             f"chunk_stride: {args.chunk_stride}",
+            f"skip_crop_resize: {args.skip_crop_resize}",
             f"batch_size: {args.batch_size}",
             f"lr: {args.lr}",
             f"epochs: {args.epochs}",

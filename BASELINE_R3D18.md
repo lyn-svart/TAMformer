@@ -80,6 +80,19 @@ epoch=1 step=50/5033 sec/batch=10.20 samp/sec=6.27 loss=1.12
 
 You do **not** need to finish an epoch to estimate speed.
 
+### Throughput benchmark: skip bbox crop (not for final metrics)
+
+Measures how much time bbox crop+resize costs. Uses **full frame** resized to 112×112 (still reads/decodes full images; still one resize per frame).
+
+```bash
+SKIP_CROP_RESIZE=1 FRACTION=0.05 MAX_TRAIN_BATCHES=200 LOG_EVERY_N_BATCHES=20 \
+CHUNK_STRIDE=4 BATCH=64 WORKERS=8 bash run_r3d18.sh
+```
+
+Or: `python r3d18.py --source ... --skip-crop-resize ...`
+
+Compare `sec/batch` in `training_results.txt` with and without this flag. **Do not** use for paper numbers vs TAMformer.
+
 ### Quick benchmark (minutes, not hours)
 
 ```bash
