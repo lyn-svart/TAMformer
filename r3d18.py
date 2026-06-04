@@ -128,9 +128,15 @@ def parse_args():
                          help="Stop each train epoch after N batches (0=full epoch; for benchmarks)")
     g_train.add_argument(
         "--no-dedupe-frame-reads",
+        dest="no_dedupe_frame_reads",
         action="store_true",
-        help="Old loader: each sample reads frames in workers. Default: one read per "
-             "unique frame path per batch (collate), then crop all boxes.",
+        help="Per-sample frame reads in workers (default).",
+    )
+    g_train.add_argument(
+        "--dedupe-frame-reads",
+        dest="no_dedupe_frame_reads",
+        action="store_false",
+        help="Batch dedupe: one imread per unique frame path per batch, then crop all boxes.",
     )
 
     g_train.add_argument("--no-resume", action="store_true",
@@ -140,6 +146,7 @@ def parse_args():
     g_filter.add_argument("--frame-keep-mod", type=int, default=1,
                         help="Kept for CLI compatibility; track sliding windows ignore stride subsampling")
 
+    parser.set_defaults(no_dedupe_frame_reads=True)
     return parser.parse_args()
 
 
@@ -432,7 +439,7 @@ class PreventionClipsFromFrames(Dataset):
                 "WARNING: --skip-crop-resize enabled (full-frame resize only; "
                 "for throughput benchmarks, not fair R3D/TAMformer comparison)."
             )
-        elif not getattr(self.args, "no_dedupe_frame_reads", False):
+        elif not getattr(self.args, "no_dedupe_frame_reads", True):
             print(
                 "Frame dedupe enabled: each batch reads every unique frame path once, "
                 "then crops all boxes (collate_fn)."
@@ -465,7 +472,7 @@ class PreventionClipsFromFrames(Dataset):
 
     def __getitem__(self, idx):
         s = self.samples[idx]
-        if not getattr(self.args, "no_dedupe_frame_reads", False):
+        if not getattr(self.args, "no_dedupe_frame_reads", True):
             return s
 
         label = s["label"]

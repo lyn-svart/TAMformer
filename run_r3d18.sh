@@ -37,7 +37,7 @@ CROP_PAD="${CROP_PAD:-0.10}"
 INPUT_SIZE="${INPUT_SIZE:-112}"
 SKIP_CROP_RESIZE="${SKIP_CROP_RESIZE:-}"   # set to 1 for full-frame resize benchmark (no bbox crop)
 BENCHMARK_DUMMY_READ="${BENCHMARK_DUMMY_READ:-}"  # set to 1: read frames, feed zeros to model
-NO_DEDUPE_FRAME_READS="${NO_DEDUPE_FRAME_READS:-}"  # set to 1: old per-sample reads in workers
+NO_DEDUPE_FRAME_READS="${NO_DEDUPE_FRAME_READS:-1}"  # set to 0 to enable batch frame dedupe
 
 # TAMformer motion_location config: batch 64, lr 1e-4, epochs 20, no class weights
 BATCH="${BATCH:-64}"
@@ -72,7 +72,7 @@ echo "  CHUNK_STRIDE   : $CHUNK_STRIDE"
 echo "  INPUT_SIZE     : $INPUT_SIZE"
 echo "  SKIP_CROP      : ${SKIP_CROP_RESIZE:-off (bbox crop)}"
 echo "  DUMMY_READ     : ${BENCHMARK_DUMMY_READ:-off}"
-if [ -n "$NO_DEDUPE_FRAME_READS" ]; then
+if [ "$NO_DEDUPE_FRAME_READS" != "0" ]; then
   echo "  DEDUPE_READS   : off (per-sample in workers)"
 else
   echo "  DEDUPE_READS   : on (one imread per unique path per batch)"
@@ -102,7 +102,9 @@ EXTRA_FLAGS="--save-dir $SAVE_DIR"
 [ -n "$COMPILE"        ] && EXTRA_FLAGS="$EXTRA_FLAGS --compile"
 [ -n "$SKIP_CROP_RESIZE" ] && EXTRA_FLAGS="$EXTRA_FLAGS --skip-crop-resize"
 [ -n "$BENCHMARK_DUMMY_READ" ] && EXTRA_FLAGS="$EXTRA_FLAGS --benchmark-dummy-read"
-[ -n "$NO_DEDUPE_FRAME_READS" ] && EXTRA_FLAGS="$EXTRA_FLAGS --no-dedupe-frame-reads"
+if [ "$NO_DEDUPE_FRAME_READS" != "0" ]; then
+  EXTRA_FLAGS="$EXTRA_FLAGS --no-dedupe-frame-reads"
+fi
 [ -n "$NO_RESUME" ] && EXTRA_FLAGS="$EXTRA_FLAGS --no-resume"
 
 $PYTHON "$SCRIPT_DIR/r3d18.py" \
