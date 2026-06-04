@@ -59,6 +59,7 @@ torch.backends.cudnn.benchmark = True
 
 # Directory containing this script (default location for training_results.txt)
 CODE_DIR = Path(__file__).resolve().parent
+MODEL_NAME = "r3d18"
 
 
 def parse_args():
@@ -73,7 +74,7 @@ def parse_args():
     g_paths.add_argument("--frames-root", default=None,
                          help="Frame files root (default: same as --source)")
     g_paths.add_argument("--save-dir", default=None,
-                         help="Checkpoints dir (default: <source>/../checkpoints)")
+                         help=f"Checkpoints dir (default: <repo>/checkpoints/{MODEL_NAME})")
     g_paths.add_argument("--results-dir", default=None,
                          help="Directory for training_results.txt and test_results.txt "
                               "(default: folder containing r3d18.py)")
@@ -131,6 +132,9 @@ def parse_args():
         help="Old loader: each sample reads frames in workers. Default: one read per "
              "unique frame path per batch (collate), then crop all boxes.",
     )
+
+    g_train.add_argument("--no-resume", action="store_true",
+                         help="Train from scratch even if a checkpoint exists in --save-dir")
 
     g_filter = parser.add_argument_group("Legacy filtering (unused when align-tamformer)")
     g_filter.add_argument("--frame-keep-mod", type=int, default=1,
@@ -697,6 +701,47 @@ def print_per_class_report(y_true, y_pred, num_classes: int = NUM_MOTION_CLASSES
     print(sklearn_classification_report(y_true, y_pred, num_classes))
 
 
+def default_save_dir(model_name: str = MODEL_NAME) -> str:
+    return str(CODE_DIR / "checkpoints" / model_name)
+
+
+def find_resume_checkpoint(save_dir: str, best_path: str, no_resume: bool) -> Optional[str]:
+    if no_resume:
+        return None
+    latest_path = os.path.join(save_dir, "checkpoint.pt")
+    if os.path.isfile(latest_path):
+        return latest_path
+    if os.path.isfile(best_path):
+        return best_path
+    return None
+
+
+def load_training_checkpoint(path: str, model: nn.Module, device: str) -> Dict:
+    ckpt = torch.load(path, map_location=device, weights_only=False)
+    model.load_state_dict(ckpt["model"])
+    return ckpt
+
+
+def save_training_checkpoint(
+    path: str,
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    epoch: int,
+    best_val_loss: float,
+    no_improve: int,
+) -> None:
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "epoch": epoch,
+            "best_val_loss": best_val_loss,
+            "no_improve": no_improve,
+        },
+        path,
+    )
+
+
 def main():
     cv2.setNumThreads(0)
     args = parse_args()
@@ -710,7 +755,7 @@ def main():
 
     source = args.source
     frames_root = args.frames_root or source
-    save_dir = args.save_dir or str(Path(source).parent / "checkpoints")
+    save_dir = args.save_dir or default_save_dir()
     train_json = args.train_json or os.path.join(source, "Train.json")
     val_json = args.val_json or os.path.join(source, "Validation.json")
     test_json = args.test_json or os.path.join(source, "Test.json")
@@ -723,7 +768,8 @@ def main():
         results_dir = str(CODE_DIR)
     train_log_file = os.path.abspath(training_log_path(results_dir))
     test_log_file = os.path.abspath(test_log_path(results_dir))
-    best_model_path = os.path.join(save_dir, "best_r3d18.pt")
+    best_model_path = os.path.join(save_dir, f"best_{MODEL_NAME}.pt")
+    latest_checkpoint_path = os.path.join(save_dir, "checkpoint.pt")
 
     assert Path(source).exists(), f"--source not found: {source}"
     for p in [train_json, val_json, test_json]:
@@ -851,6 +897,24 @@ def main():
     test_loader = DataLoader(test_set, shuffle=False, **loader_kw)
 
     model = make_model().to(device)
+    resume_path = find_resume_checkpoint(save_dir, best_model_path, args.no_resume)
+    resume_ckpt = None
+    if resume_path:
+        resume_ckpt = load_training_checkpoint(resume_path, model, device)
+        print(f"Resuming from checkpoint: {resume_path}")
+        print(
+            f"  last epoch   : {resume_ckpt['epoch']}/{args.epochs}"
+            f"  best_val_loss: {resume_ckpt.get('best_val_loss', float('inf')):.4f}"
+        )
+        append_epoch_line(
+            train_log_file,
+            "resume: {} (epoch {}, best_val_loss={:.6f})".format(
+                resume_path,
+                resume_ckpt["epoch"],
+                resume_ckpt.get("best_val_loss", float("inf")),
+            ),
+        )
+
     if args.compile:
         if hasattr(torch, "compile"):
             try:
@@ -867,73 +931,96 @@ def main():
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay
     )
 
-    best_loss, no_improve = float("inf"), 0
+    if resume_ckpt is not None:
+        opt.load_state_dict(resume_ckpt["optimizer"])
+        start_epoch = resume_ckpt["epoch"] + 1
+        best_loss = resume_ckpt.get("best_val_loss", float("inf"))
+        no_improve = resume_ckpt.get("no_improve", 0)
+    else:
+        start_epoch = 1
+        best_loss, no_improve = float("inf"), 0
+
     ce = nn.CrossEntropyLoss()
 
-    print("\nStarting training…")
-    for epoch in range(1, args.epochs + 1):
-        print(f"\nEpoch {epoch}/{args.epochs}")
-        train_loss, sec_per_batch, samples_per_sec = train_one_epoch(
-            model,
-            train_loader,
-            opt,
-            device,
-            epoch=epoch,
-            log_file=train_log_file,
-            log_every_n_batches=args.log_every_n_batches,
-            max_train_batches=args.max_train_batches,
-            collate_stats=collate_stats if not args.no_dedupe_frame_reads else None,
+    if start_epoch > args.epochs:
+        print(
+            f"\nCheckpoint already at epoch {start_epoch - 1}/{args.epochs} — skipping training."
         )
-        val_acc, val_metrics, val_loss = evaluate(
-            model,
-            val_loader,
-            device,
-            criterion=ce,
-            desc="Validating",
-        )
-        print(f"Train Loss: {train_loss:.4f}  |  Val Loss: {val_loss:.4f}  |  Val Acc: {val_acc:.3f}")
-        print_motion_metrics(val_metrics, header="val motion")
-
-        notes = ""
-        if val_loss < best_loss:
-            best_loss, no_improve = val_loss, 0
-            torch.save(
-                {
-                    "model": model.state_dict(),
-                    "optimizer": opt.state_dict(),
-                    "epoch": epoch,
-                    "best_val_loss": best_loss,
-                },
-                best_model_path,
-            )
-            notes = "saved best"
-            print(f"New best model saved (val_loss={best_loss:.4f})")
-        else:
-            no_improve += 1
-            notes = "patience {}/{}".format(no_improve, args.patience)
-            print(f"No improvement - patience {no_improve}/{args.patience}")
-            if args.patience < args.epochs and no_improve >= args.patience:
-                print("Early stopping triggered.")
-                notes = "early stop"
-                append_epoch_line(
-                    train_log_file,
-                    "{:>5}  {:>12.6f}  {:>12.6f}  {:>10.4f}  {:>10.4f}  {:>10.2f}  {}".format(
-                        epoch, train_loss, val_loss, val_acc, sec_per_batch, samples_per_sec, notes,
-                    ),
-                )
-                append_epoch_line(train_log_file, motion_metrics_line(val_metrics, "val motion"))
-                break
-
         append_epoch_line(
             train_log_file,
-            "{:>5}  {:>12.6f}  {:>12.6f}  {:>10.4f}  {:>10.4f}  {:>10.2f}  {}".format(
-                epoch, train_loss, val_loss, val_acc, sec_per_batch, samples_per_sec, notes,
+            "training skipped: checkpoint epoch {} >= target epochs {}".format(
+                start_epoch - 1, args.epochs,
             ),
         )
-        append_epoch_line(train_log_file, motion_metrics_line(val_metrics, "val motion"))
+    else:
+        print(f"\nStarting training from epoch {start_epoch}/{args.epochs}…")
+        for epoch in range(start_epoch, args.epochs + 1):
+            print(f"\nEpoch {epoch}/{args.epochs}")
+            train_loss, sec_per_batch, samples_per_sec = train_one_epoch(
+                model,
+                train_loader,
+                opt,
+                device,
+                epoch=epoch,
+                log_file=train_log_file,
+                log_every_n_batches=args.log_every_n_batches,
+                max_train_batches=args.max_train_batches,
+                collate_stats=collate_stats if not args.no_dedupe_frame_reads else None,
+            )
+            val_acc, val_metrics, val_loss = evaluate(
+                model,
+                val_loader,
+                device,
+                criterion=ce,
+                desc="Validating",
+            )
+            print(f"Train Loss: {train_loss:.4f}  |  Val Loss: {val_loss:.4f}  |  Val Acc: {val_acc:.3f}")
+            print_motion_metrics(val_metrics, header="val motion")
+
+            notes = ""
+            if val_loss < best_loss:
+                best_loss, no_improve = val_loss, 0
+                save_training_checkpoint(
+                    best_model_path, model, opt, epoch, best_loss, no_improve,
+                )
+                notes = "saved best"
+                print(f"New best model saved (val_loss={best_loss:.4f})")
+            else:
+                no_improve += 1
+                notes = "patience {}/{}".format(no_improve, args.patience)
+                print(f"No improvement - patience {no_improve}/{args.patience}")
+                if args.patience < args.epochs and no_improve >= args.patience:
+                    print("Early stopping triggered.")
+                    notes = "early stop"
+                    save_training_checkpoint(
+                        latest_checkpoint_path, model, opt, epoch, best_loss, no_improve,
+                    )
+                    append_epoch_line(
+                        train_log_file,
+                        "{:>5}  {:>12.6f}  {:>12.6f}  {:>10.4f}  {:>10.4f}  {:>10.2f}  {}".format(
+                            epoch, train_loss, val_loss, val_acc, sec_per_batch, samples_per_sec, notes,
+                        ),
+                    )
+                    append_epoch_line(train_log_file, motion_metrics_line(val_metrics, "val motion"))
+                    break
+
+            save_training_checkpoint(
+                latest_checkpoint_path, model, opt, epoch, best_loss, no_improve,
+            )
+            append_epoch_line(
+                train_log_file,
+                "{:>5}  {:>12.6f}  {:>12.6f}  {:>10.4f}  {:>10.4f}  {:>10.2f}  {}".format(
+                    epoch, train_loss, val_loss, val_acc, sec_per_batch, samples_per_sec, notes,
+                ),
+            )
+            append_epoch_line(train_log_file, motion_metrics_line(val_metrics, "val motion"))
 
     print("\nTraining done — loading best model for test…")
-    ckpt = torch.load(best_model_path, map_location=device)
+    assert os.path.isfile(best_model_path), (
+        f"No best checkpoint found at {best_model_path}. "
+        "Train at least one epoch or pass --no-resume to start fresh."
+    )
+    ckpt = torch.load(best_model_path, map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model"])
     test_acc, test_metrics, _ = evaluate(model, test_loader, device, desc="Testing")
 
