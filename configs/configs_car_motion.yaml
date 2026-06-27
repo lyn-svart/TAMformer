@@ -37,10 +37,10 @@ model_opts:
   local_context_input: raw
   partial_weight_loading: True
 data_opts:
-  train_annotation_file: ./Train.json
-  validation_annotation_file: ./Validation.json
-  test_annotation_file: ./Validation.json
-  path_to_dataset: .
+  train_annotation_file: /home/bkaradurak/Projects/ObjectMotionDetection/02-Source/PreventionData/Train.json
+  validation_annotation_file: /home/bkaradurak/Projects/ObjectMotionDetection/02-Source/PreventionData/Validation.json
+  test_annotation_file: /home/bkaradurak/Projects/ObjectMotionDetection/02-Source/PreventionData/Validation.json
+  path_to_dataset: /home/bkaradurak/Projects/ObjectMotionDetection/02-Source/PreventionData/
   object_types: []
   ignored_object_types: [Human]
   label_source: motion
