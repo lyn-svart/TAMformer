@@ -27,7 +27,7 @@ model_opts:
   dropout: 0.1
   classifier_activation: linear
   classifier_loss: sparse_categorical_crossentropy
-  epochs: 100
+  epochs: 20
   optimizer: adam
   lr: 0.0001
   model_path: ./models
