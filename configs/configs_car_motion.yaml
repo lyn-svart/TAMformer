@@ -22,8 +22,8 @@ model_opts:
   normalize_boxes: True
   data_augmentation: False
   generator: True
-  batch_size: 32
-  val_batch_size: 32
+  batch_size: 4
+  val_batch_size: 4
   dropout: 0.1
   classifier_activation: linear
   classifier_loss: sparse_categorical_crossentropy
