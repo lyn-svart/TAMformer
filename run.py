@@ -12,6 +12,7 @@ import pickle
 import cv2
 import glob
 import re
+import time
 import tensorflow as tf
 import random as rn
 from argparse import ArgumentParser
@@ -156,6 +157,7 @@ class BatchDebugCallback(tf.keras.callbacks.Callback):
         self.log_interval = log_interval
         self.sample_count = sample_count
         self.current_epoch = 0
+        self.epoch_start_time = None
         self.batch_log_dir = os.path.join(output_dir, 'batch_logs')
         self.input_image_dir = os.path.join(output_dir, 'randomized_inputs')
         os.makedirs(self.batch_log_dir, exist_ok=True)
@@ -167,25 +169,48 @@ class BatchDebugCallback(tf.keras.callbacks.Callback):
 
     def on_epoch_begin(self, epoch, logs=None):
         self.current_epoch = epoch + 1
+        self.epoch_start_time = time.time()
         save_random_generator_inputs(self.generator, self.input_types, self.input_image_dir,
                                      'epoch_{:03d}'.format(self.current_epoch), self.sample_count)
+
+    def _progress_bar(self, batch_number):
+        total_batches = max(len(self.generator), 1)
+        width = 30
+        filled = int(width * batch_number / total_batches)
+        if filled >= width:
+            return '=' * width
+        return '=' * filled + '>' + '.' * (width - filled - 1)
+
+    def _eta(self, batch_number):
+        if not self.epoch_start_time or batch_number <= 0:
+            return '?:??:??'
+        elapsed = time.time() - self.epoch_start_time
+        seconds_per_batch = elapsed / float(batch_number)
+        remaining = max(len(self.generator) - batch_number, 0) * seconds_per_batch
+        hours = int(remaining // 3600)
+        minutes = int((remaining % 3600) // 60)
+        seconds = int(remaining % 60)
+        return '{}:{:02d}:{:02d}'.format(hours, minutes, seconds)
 
     def on_train_batch_end(self, batch, logs=None):
         batch_number = batch + 1
         if batch_number % self.log_interval != 0:
             return
         logs = logs or {}
-        message = 'epoch: {}\nbatch: {}\n{}\n'.format(
-            self.current_epoch,
+        total_batches = len(self.generator)
+        loss = float(logs.get('loss', 0.0))
+        accuracy = logs.get('accuracy', logs.get('sparse_categorical_accuracy', 0.0))
+        accuracy = float(accuracy)
+        message = '{}/{} [{}] - ETA: {} - loss: {:.4f} - accuracy: {:.4f}'.format(
             batch_number,
-            '\n'.join(['{}: {}'.format(k, v) for k, v in sorted(logs.items())])
+            total_batches,
+            self._progress_bar(batch_number),
+            self._eta(batch_number),
+            loss,
+            accuracy
         )
-        path = os.path.join(self.batch_log_dir,
-                            'epoch_{:03d}_batch_{:06d}.txt'.format(self.current_epoch, batch_number))
-        with open(path, 'w') as f:
-            f.write(message)
         with open(os.path.join(self.batch_log_dir, 'training_batches.txt'), 'a') as f:
-            f.write(message + '\n')
+            f.write('epoch {} - {}\n'.format(self.current_epoch, message))
 
 
 def get_multiclass_labels(data_bundle):

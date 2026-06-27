@@ -39,7 +39,7 @@ model_opts:
   model_path: ./models
   checkpoint_dir: ./models/checkpoints
   debug_output_dir: ./models/debug_outputs
-  batch_log_interval: 50
+  batch_log_interval: 1000
   debug_sample_count: 3
   inference_sample_count: 8
   step: 1
