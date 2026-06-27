@@ -10,6 +10,8 @@ import numpy as np
 import getopt
 import pickle
 import cv2
+import glob
+import re
 import tensorflow as tf
 import random as rn
 from argparse import ArgumentParser
@@ -26,7 +28,148 @@ from tensorflow.keras.optimizers import Adam, SGD, RMSprop
 from tensorflow import keras
 
 
-def run(config_path, auxiliary_loss, test, resume):
+def checkpoint_prefix(model_name):
+    return os.path.splitext(os.path.basename(model_name))[0]
+
+
+def get_checkpoint_dir(model_opts):
+    return model_opts.get('checkpoint_dir',
+                          os.path.join(model_opts['model_path'], 'checkpoints'))
+
+
+def latest_checkpoint(checkpoint_dir, prefix):
+    pattern = os.path.join(checkpoint_dir, prefix + '_epoch_*.h5')
+    checkpoints = glob.glob(pattern)
+    if not checkpoints:
+        return None, 0
+    epoch_re = re.compile(re.escape(prefix) + r'_epoch_(\d+)\.h5$')
+    parsed = []
+    for path in checkpoints:
+        match = epoch_re.search(os.path.basename(path))
+        if match:
+            parsed.append((int(match.group(1)), path))
+    if not parsed:
+        return max(checkpoints, key=os.path.getmtime), 0
+    epoch, path = max(parsed, key=lambda item: item[0])
+    return path, epoch
+
+
+def image_output_dir(model_opts, name):
+    base_dir = model_opts.get('debug_output_dir',
+                              os.path.join(model_opts['model_path'], 'debug_outputs'))
+    path = os.path.join(base_dir, name)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def to_uint8_image(image):
+    image = np.asarray(image)
+    if image.ndim != 3:
+        return None
+    if image.dtype != np.uint8:
+        image = np.clip(image, 0, 255).astype(np.uint8)
+    return image
+
+
+def save_context_sequence(sequence, output_dir, prefix):
+    os.makedirs(output_dir, exist_ok=True)
+    for frame_idx, frame in enumerate(sequence):
+        image = to_uint8_image(frame)
+        if image is None:
+            continue
+        cv2.imwrite(os.path.join(output_dir, '{}_frame_{:02d}.jpg'.format(prefix, frame_idx)), image)
+
+
+def context_input_index(input_types):
+    for idx, input_type in enumerate(input_types):
+        if 'context' in input_type or 'local' in input_type:
+            return idx
+    return None
+
+
+def save_random_generator_inputs(generator, input_types, output_dir, prefix, sample_count=3):
+    if generator is None or len(generator) == 0:
+        return
+    context_idx = context_input_index(input_types)
+    if context_idx is None:
+        return
+    batch_idx = np.random.randint(0, len(generator))
+    X, y = generator[batch_idx]
+    context_batch = X[context_idx]
+    count = min(sample_count, len(context_batch))
+    if count == 0:
+        return
+    sample_indices = np.random.choice(len(context_batch), size=count, replace=False)
+    for out_idx, sample_idx in enumerate(sample_indices):
+        label = y[sample_idx] if not isinstance(y, list) else y[0][sample_idx]
+        sample_prefix = '{}_batch_{:05d}_sample_{}_label_{}'.format(prefix, batch_idx, out_idx, label)
+        save_context_sequence(context_batch[sample_idx], output_dir, sample_prefix)
+
+
+def save_inference_samples(generator, input_types, output_dir, predictions=None, labels=None, sample_count=8):
+    if generator is None or len(generator) == 0:
+        return
+    context_idx = context_input_index(input_types)
+    if context_idx is None:
+        return
+    count = min(sample_count, len(generator))
+    sample_indices = np.random.choice(len(generator), size=count, replace=False)
+    for sample_idx in sample_indices:
+        X, y = generator[sample_idx]
+        context_batch = X[context_idx]
+        pred_label = None
+        if predictions is not None:
+            pred = predictions[sample_idx]
+            pred_label = int(np.argmax(pred)) if np.ndim(pred) > 0 else int(pred)
+        true_label = labels[sample_idx] if labels is not None else (y[0] if np.ndim(y) > 0 else y)
+        prefix = 'sample_{:05d}_true_{}'.format(sample_idx, int(true_label))
+        if pred_label is not None:
+            prefix += '_pred_{}'.format(pred_label)
+        save_context_sequence(context_batch[0], output_dir, prefix)
+
+
+class BatchDebugCallback(tf.keras.callbacks.Callback):
+    def __init__(self, generator, input_types, output_dir, log_interval=50, sample_count=3):
+        super(BatchDebugCallback, self).__init__()
+        self.generator = generator
+        self.input_types = input_types
+        self.output_dir = output_dir
+        self.log_interval = log_interval
+        self.sample_count = sample_count
+        self.current_epoch = 0
+        self.batch_log_dir = os.path.join(output_dir, 'batch_logs')
+        self.input_image_dir = os.path.join(output_dir, 'randomized_inputs')
+        os.makedirs(self.batch_log_dir, exist_ok=True)
+        os.makedirs(self.input_image_dir, exist_ok=True)
+
+    def on_train_begin(self, logs=None):
+        save_random_generator_inputs(self.generator, self.input_types, self.input_image_dir,
+                                     'train_begin', self.sample_count)
+
+    def on_epoch_begin(self, epoch, logs=None):
+        self.current_epoch = epoch + 1
+        save_random_generator_inputs(self.generator, self.input_types, self.input_image_dir,
+                                     'epoch_{:03d}'.format(self.current_epoch), self.sample_count)
+
+    def on_train_batch_end(self, batch, logs=None):
+        batch_number = batch + 1
+        if batch_number % self.log_interval != 0:
+            return
+        logs = logs or {}
+        message = 'epoch: {}\nbatch: {}\n{}\n'.format(
+            self.current_epoch,
+            batch_number,
+            '\n'.join(['{}: {}'.format(k, v) for k, v in sorted(logs.items())])
+        )
+        path = os.path.join(self.batch_log_dir,
+                            'epoch_{:03d}_batch_{:06d}.txt'.format(self.current_epoch, batch_number))
+        with open(path, 'w') as f:
+            f.write(message)
+        with open(os.path.join(self.batch_log_dir, 'training_batches.txt'), 'a') as f:
+            f.write(message + '\n')
+
+
+def run(config_path, auxiliary_loss, test, resume, fresh=False):
     with open(config_path, 'r') as f:
         configs = yaml.safe_load(f)
 
@@ -58,11 +201,24 @@ def run(config_path, auxiliary_loss, test, resume):
                  +'/tamformer_'+configs['model_opts']['dataset']+'_'\
                  +'_'.join(configs['model_opts']['obs_input_type'])+'_'\
                  +str(configs['model_opts']['lr'])+'.h5'
+    os.makedirs(configs['model_opts']['model_path'], exist_ok=True)
+    ckpt_dir = get_checkpoint_dir(configs['model_opts'])
+    os.makedirs(ckpt_dir, exist_ok=True)
+    prefix = checkpoint_prefix(model_name)
+    checkpoint_path, checkpoint_epoch = latest_checkpoint(ckpt_dir, prefix)
+    initial_epoch = 0
 
     if test or resume:
-        print("Lodaing "+model_name+" ...")
-        partial_loading = configs['model_opts'].get('partial_weight_loading', False)
-        tamformer.load_weights(model_name, by_name=partial_loading, skip_mismatch=partial_loading)
+        weights_to_load = checkpoint_path if checkpoint_path is not None else model_name
+        print("Loading "+weights_to_load+" ...")
+        partial_loading = configs['model_opts'].get('partial_weight_loading', False) and checkpoint_path is None
+        tamformer.load_weights(weights_to_load, by_name=partial_loading, skip_mismatch=partial_loading)
+    elif not test and not fresh and checkpoint_path is not None:
+        print("Resuming from checkpoint {} ...".format(checkpoint_path))
+        tamformer.load_weights(checkpoint_path)
+        initial_epoch = checkpoint_epoch
+    elif fresh:
+        print("Fresh training requested; existing checkpoints will be ignored.")
     if not test:
         optimizer = get_optimizer(configs['model_opts']['optimizer'])(learning_rate=configs['model_opts']['lr'])
         if configs['model_opts'].get('label_format') == 'multiclass':
@@ -79,28 +235,40 @@ def run(config_path, auxiliary_loss, test, resume):
                               optimizer=optimizer,
                               metrics=['accuracy'])
 
-        checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(filepath=model_name,
+        checkpoint_template = os.path.join(ckpt_dir, prefix + '_epoch_{epoch:03d}.h5')
+        checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(filepath=checkpoint_template,
                                                                  save_weights_only=True,
-                                                                 monitor='val_loss',
-                                                                 mode='min',
-                                                                 save_best_only=True)
+                                                                 save_best_only=False)
+        debug_callback = BatchDebugCallback(data_train['data'][0],
+                                            configs['model_opts']['obs_input_type'],
+                                            image_output_dir(configs['model_opts'], prefix),
+                                            log_interval=configs['model_opts'].get('batch_log_interval', 50),
+                                            sample_count=configs['model_opts'].get('debug_sample_count', 3))
         history = tamformer.fit(x=data_train['data'][0],
                                 y=None,
                                 batch_size=configs['model_opts']['batch_size'],
                                 epochs=configs['model_opts']['epochs'],
+                                initial_epoch=initial_epoch,
                                 validation_data=val_data['data'][0],
                                 verbose=1,
-                                callbacks=[checkpoint_callback])
+                                callbacks=[checkpoint_callback, debug_callback])
+        tamformer.save_weights(model_name)
 
         tamformer = TAMformer(configs['model_opts'], auxiliary_loss).tamformer()
-        partial_loading = configs['model_opts'].get('partial_weight_loading', False)
-        tamformer.load_weights(model_name, by_name=partial_loading, skip_mismatch=partial_loading)
+        checkpoint_path, _ = latest_checkpoint(ckpt_dir, prefix)
+        tamformer.load_weights(checkpoint_path if checkpoint_path is not None else model_name)
 
     print("Testing ...")
     test_results = tamformer.predict(test_data['data'][0], verbose=1)
     if configs['model_opts'].get('label_format') == 'multiclass':
         y_true = test_data['data'][1]
         y_pred = np.argmax(test_results, axis=-1)
+        save_inference_samples(test_data['data'][0],
+                               configs['model_opts']['obs_input_type'],
+                               os.path.join(image_output_dir(configs['model_opts'], prefix), 'inference_samples'),
+                               predictions=test_results,
+                               labels=y_true,
+                               sample_count=configs['model_opts'].get('inference_sample_count', 8))
         print('acc:', accuracy_score(y_true, y_pred),
               '- macro_f1:', f1_score(y_true, y_pred, average='macro'))
         return
@@ -206,6 +374,8 @@ if __name__ == '__main__':
     parser.add_argument('--auxiliary_loss', action='store_true')
     parser.add_argument('--test', action='store_true')
     parser.add_argument('--resume', action='store_true')
+    parser.add_argument('--fresh', action='store_true',
+                        help='Start training from scratch and ignore existing checkpoints')
 
     args = parser.parse_args()
-    run(args.config_file, args.auxiliary_loss, args.test, args.resume)
+    run(args.config_file, args.auxiliary_loss, args.test, args.resume, args.fresh)
