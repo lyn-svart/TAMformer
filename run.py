@@ -1,5 +1,6 @@
 from pie_data import PIE
 from jaad_data import JAAD
+from car_motion_data import CarMotion
 from data_generator import DataGenerator, DataGetter
 from tamformer import TAMformer
 import os
@@ -35,6 +36,8 @@ def run(config_path, auxiliary_loss, test, resume):
 
     if configs['model_opts']['dataset'] == 'jaad':
         imdb = JAAD(data_path= configs['data_opts']['path_to_dataset'])
+    elif configs['model_opts']['dataset'] == 'car_motion':
+        imdb = CarMotion(data_path=configs['data_opts']['path_to_dataset'])
     else:
         imdb = PIE(data_path= configs['data_opts']['path_to_dataset'])
 
@@ -44,7 +47,7 @@ def run(config_path, auxiliary_loss, test, resume):
 
     data_getter_train = DataGetter('train', data_raw_train, configs['model_opts'])
     data_getter_test = DataGetter('test', data_raw_test, configs['model_opts'])
-    data_getter_val = DataGetter('val', data_raw_test, configs['model_opts'])
+    data_getter_val = DataGetter('val', data_raw_val, configs['model_opts'])
 
     data_train = data_getter_train.get_data()
     test_data = data_getter_test.get_data()
@@ -58,17 +61,23 @@ def run(config_path, auxiliary_loss, test, resume):
 
     if test or resume:
         print("Lodaing "+model_name+" ...")
-        tamformer.load_weights(model_name, by_name=False, skip_mismatch=False)
+        partial_loading = configs['model_opts'].get('partial_weight_loading', False)
+        tamformer.load_weights(model_name, by_name=partial_loading, skip_mismatch=partial_loading)
     if not test:
-        class_w = class_weights(configs['model_opts']['apply_class_weights'],
-                                     data_train['count'],
-                                     configs['model_opts']['negative_weight'],
-                                     configs['model_opts']['positive_weight'])
         optimizer = get_optimizer(configs['model_opts']['optimizer'])(learning_rate=configs['model_opts']['lr'])
-        w = [class_w[0], class_w[1]]
-        tamformer.compile(loss=weighted_binary_crossentropy(weights=w),
-                          optimizer=optimizer,
-                          metrics=['accuracy'])
+        if configs['model_opts'].get('label_format') == 'multiclass':
+            tamformer.compile(loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+                              optimizer=optimizer,
+                              metrics=[tf.keras.metrics.SparseCategoricalAccuracy(name='accuracy')])
+        else:
+            class_w = class_weights(configs['model_opts']['apply_class_weights'],
+                                         data_train['count'],
+                                         configs['model_opts']['negative_weight'],
+                                         configs['model_opts']['positive_weight'])
+            w = [class_w[0], class_w[1]]
+            tamformer.compile(loss=weighted_binary_crossentropy(weights=w),
+                              optimizer=optimizer,
+                              metrics=['accuracy'])
 
         checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(filepath=model_name,
                                                                  save_weights_only=True,
@@ -84,10 +93,17 @@ def run(config_path, auxiliary_loss, test, resume):
                                 callbacks=[checkpoint_callback])
 
         tamformer = TAMformer(configs['model_opts'], auxiliary_loss).tamformer()
-        tamformer.load_weights(model_name)
+        partial_loading = configs['model_opts'].get('partial_weight_loading', False)
+        tamformer.load_weights(model_name, by_name=partial_loading, skip_mismatch=partial_loading)
 
     print("Testing ...")
     test_results = tamformer.predict(test_data['data'][0], verbose=1)
+    if configs['model_opts'].get('label_format') == 'multiclass':
+        y_true = test_data['data'][1]
+        y_pred = np.argmax(test_results, axis=-1)
+        print('acc:', accuracy_score(y_true, y_pred),
+              '- macro_f1:', f1_score(y_true, y_pred, average='macro'))
+        return
     best_perf_acc = [0 for i in range(40)]
     best_perf_auc = [0 for i in range(40)]
     best_perf_f1 = [0 for i in range(40)]

@@ -37,8 +37,9 @@ class DataGenerator(Sequence):
         self.to_fit = to_fit
         self.stack_feats = stack_feats
         self.indices = None
+        self.opts = opts or {}
+        self.label_format = self.opts.get('label_format', 'binary')
         self.on_epoch_end()
-        self.opts = opts
 
     def get_size(self):
         return len(self.data[0])
@@ -48,6 +49,10 @@ class DataGenerator(Sequence):
 
     def on_epoch_end(self):
         self.indices = np.arange(len(self.data[0]))
+        if self.label_format == 'multiclass':
+            if self.shuffle:
+                np.random.shuffle(self.indices)
+            return
         self.pos_indices = []
         self.neg_indices = []
         for i in range(len(self.data[0])):
@@ -63,7 +68,7 @@ class DataGenerator(Sequence):
             np.random.shuffle(self.neg_indices)
 
     def __getitem__(self, index):
-        if self.batch_size == 1 or self.batch_size == 612:
+        if self.label_format == 'multiclass' or self.batch_size == 1 or self.batch_size == 612:
             indices = self.indices[index*self.batch_size: (index+1)*self.batch_size]
         else:
             b_size = int(self.batch_size/2)
@@ -135,13 +140,18 @@ class DataGenerator(Sequence):
                     features_batch[i, ] = self.data[input_type_idx][index]
             if 'box' in input_type:
                 X.append(self._normalize_box(features_batch))
-            elif 'context' in input_type:
+            elif 'context' in input_type and self.opts.get('local_context_input') != 'raw':
                 X.append(self._normalize_VGG16(features_batch))
             else:
                 X.append(features_batch)
         return X
 
     def _generate_y(self, indices):
+        if self.label_format == 'multiclass':
+            Y = np.empty((self.batch_size,), dtype=np.int32)
+            for i, index in enumerate(indices):
+                Y[i, ] = int(self.labels[0][index])
+            return Y
         Y = np.empty((self.batch_size,))
         for i, index in enumerate(indices):
                 Y[i, ] = self.labels[0][index][0][0]
@@ -158,12 +168,14 @@ class DataGetter(object):
         self.model_opts = model_opts
         self._generator = False
         self._global_pooling = 'max'
-        self._backbone = 'vgg16'
+        self._backbone = self.model_opts.get('backbone', 'vgg16')
 
     def get_data(self):
         self._generator = self.model_opts.get('generator', False)
         data_type_sizes_dict = {}
         process = self.model_opts.get('process', True)
+        if self.model_opts.get('local_context_input') == 'raw':
+            process = False
         dataset = self.model_opts['dataset']
         data, intent_count, neg_count, pos_count = self.get_data_sequence()
 
@@ -200,8 +212,9 @@ class DataGetter(object):
             batch_size = self.model_opts['batch_size']
 
         if self._generator:
+            labels = [data['motion_label']] if self.model_opts.get('label_format') == 'multiclass' else [data['crossing'], data['goals'], data['tte']]
             _data = (DataGenerator(data=_data,
-                                   labels=[data['crossing'], data['goals'], data['tte']],
+                                   labels=labels,
                                    data_sizes=data_sizes,
                                    process=process,
                                    global_pooling=self._global_pooling,
@@ -211,7 +224,8 @@ class DataGetter(object):
                                    to_fit=self.data_type != 'test',
                                    opts=self.model_opts), data['labels'], data['lens'])
         else:
-            _data = (_data, data['crossing'])
+            labels = data['motion_label'] if self.model_opts.get('label_format') == 'multiclass' else data['crossing']
+            _data = (_data, labels)
 
         return {'data': _data,
                 'ped_id': data['ped_id'],
@@ -220,6 +234,9 @@ class DataGetter(object):
                 'count': {'neg_count': neg_count, 'pos_count': pos_count, 'intent_count':intent_count}}
 
     def get_data_sequence(self):
+        if self.model_opts.get('dataset') == 'car_motion':
+            return self.get_car_motion_data_sequence()
+
         d = {'center': self.data_raw['center'].copy(),
              'box': self.data_raw['bbox'].copy(),
              'ped_id': self.data_raw['pid'].copy(),
@@ -283,6 +300,28 @@ class DataGetter(object):
         #del self.data_raw
         notcrossing_count = len(d['crossing']) - crossing_count - intending_count
         return d, intending_count, notcrossing_count, crossing_count
+
+    def get_car_motion_data_sequence(self):
+        seq_len = self.model_opts.get('seq_len', self.model_opts.get('sequence_length', 10))
+        d = {'box': self.data_raw['bbox'].copy(),
+             'ped_id': self.data_raw.get('pid', self.data_raw.get('track_id')).copy(),
+             'image': self.data_raw['image'].copy(),
+             'motion_label': self.data_raw['label'].copy()}
+
+        for k in ['box', 'ped_id', 'image']:
+            sequences = []
+            for seq in d[k]:
+                if len(seq) < seq_len:
+                    pad = [seq[0]] * (seq_len - len(seq))
+                    seq = pad + list(seq)
+                sequences.append(seq[-seq_len:])
+            d[k] = np.array(sequences)
+
+        d['motion_label'] = np.array(d['motion_label']).astype(np.int32)
+        d['lens'] = np.array([seq_len for _ in range(len(d['motion_label']))])
+        d['labels'] = d['motion_label']
+        class_counts = np.bincount(d['motion_label'], minlength=self.model_opts.get('num_classes', 21))
+        return d, 0, int(class_counts[0]) if len(class_counts) else 0, int(np.sum(class_counts[1:]))
 
     def update_progress(self, progress):
         barLength = 20  # Modify this to change the length of the progress bar
@@ -360,6 +399,8 @@ class DataGetter(object):
 
     def get_context_data(self, data, feature_type):
         process = self.model_opts.get('process', True)
+        if self.model_opts.get('local_context_input') == 'raw':
+            process = False
         aux_name = [self._backbone]
         if not process:
             aux_name.append('raw')
@@ -368,7 +409,7 @@ class DataGetter(object):
         dataset = self.model_opts['dataset']
 
         data_gen_params = {'data_type': self.data_type, 'crop_type': 'none',
-                           'target_dim': self.model_opts.get('target_dim', (224, 224))}
+                           'target_dim': tuple(self.model_opts.get('target_dim', (224, 224)))}
         if 'local_box' in feature_type:
             data_gen_params['crop_type'] = 'bbox'
             data_gen_params['crop_mode'] = 'pad_resize'
@@ -533,9 +574,11 @@ class DataGetter(object):
             img_seq = []
             for imp, b, p in zip(seq, bbox_seq[i], pid):
                 flip_image = False
-                set_id = imp.split('/')[-3]
-                vid_id = imp.split('/')[-2]
-                img_name = imp.split('/')[-1].split('.')[0]
+                norm_imp = imp.replace('\\', '/')
+                path_parts = norm_imp.split('/')
+                set_id = path_parts[-3] if len(path_parts) >= 3 else data_type
+                vid_id = path_parts[-2] if len(path_parts) >= 2 else 'default'
+                img_name = path_parts[-1].split('.')[0]
                 img_save_folder = os.path.join(save_path, set_id, vid_id)
 
                 # Modify the path depending on crop mode
@@ -585,7 +628,7 @@ class DataGetter(object):
                             img_features = self.img_pad(cropped_image, mode='pad_resize', size=target_dim[0])
                         else:
                             raise ValueError('ERROR: Undefined value for crop_type {}!'.format(crop_type))
-                    if preprocess_input is not None:
+                    if preprocess_input is not None and process:
                         img_features = preprocess_input(img_features)
                     if process:
                         expanded_img = np.expand_dims(img_features, axis=0)

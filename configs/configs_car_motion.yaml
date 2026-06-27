@@ -1,0 +1,72 @@
+model_opts:
+  model: Static
+  backbone: vgg16
+  backbone_weights: imagenet
+  trainable_backbone: True
+  obs_input_type: [box, local_context]
+  enabled_modalities: [box, local_context]
+  pose_enabled: False
+  enlarge_ratio: 1.5
+  obs_length: 10
+  sequence_length: 10
+  seq_len: 10
+  fps: 10
+  time_to_event: 0
+  min_encoding_len: 10
+  num_classes: 21
+  label_format: multiclass
+  prediction_mode: final
+  balance_data: False
+  apply_class_weights: False
+  dataset: car_motion
+  normalize_boxes: True
+  data_augmentation: False
+  generator: True
+  batch_size: 32
+  val_batch_size: 32
+  dropout: 0.1
+  classifier_activation: linear
+  classifier_loss: sparse_categorical_crossentropy
+  epochs: 100
+  optimizer: adam
+  lr: 0.0001
+  model_path: ./models
+  step: 1
+  feat_size: [4, 512]
+  target_dim: [224, 224]
+  local_context_input: raw
+  partial_weight_loading: True
+data_opts:
+  train_annotation_file: ./Train.json
+  validation_annotation_file: ./Validation.json
+  test_annotation_file: ./Validation.json
+  path_to_dataset: .
+  object_types: []
+  ignored_object_types: [Human]
+  label_source: motion
+  motion_class_map:
+    opposite: 0
+    crossing-tocenter: 1
+    crossing-outward: 2
+    stopped: 3
+    approaching: 4
+    ra-merge: 5
+    ra-exit: 6
+    ra: 7
+    leaving: 8
+    og-exit: 9
+    passed: 10
+    passing: 11
+    og-r2l: 12
+    og-l2r: 13
+    tc-l2r: 14
+    tc-r2l: 15
+    tc-merge: 16
+    parked: 17
+    following: 18
+    ra-yield: 19
+    intent to cross: 20
+  class_id_map: {}
+  fstride: 1
+  seq_type: motion
+  min_track_size: 10
