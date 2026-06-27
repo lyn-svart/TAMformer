@@ -188,6 +188,68 @@ class BatchDebugCallback(tf.keras.callbacks.Callback):
             f.write(message + '\n')
 
 
+def get_multiclass_labels(data_bundle):
+    labels = np.asarray(data_bundle['data'][1]).astype(np.int32)
+    return labels.reshape(-1)
+
+
+def print_class_distribution(labels, num_classes, title='Class distribution'):
+    counts = np.bincount(labels, minlength=num_classes)
+    total = np.sum(counts)
+    print("### {} ###".format(title))
+    print("Total samples:", int(total))
+    for class_idx, count in enumerate(counts):
+        ratio = float(count) / float(total) if total else 0.0
+        print("class {:02d}: {:7d} ({:.4f})".format(class_idx, int(count), ratio))
+    return counts
+
+
+def effective_number_class_weights(counts, beta=0.9999, clip_min=0.25, clip_max=5.0):
+    counts = np.asarray(counts, dtype=np.float64)
+    weights = np.zeros_like(counts, dtype=np.float64)
+    present = counts > 0
+    if not np.any(present):
+        return np.ones_like(counts, dtype=np.float32)
+    effective_num = 1.0 - np.power(beta, counts[present])
+    weights[present] = (1.0 - beta) / np.maximum(effective_num, 1e-12)
+    weights[present] = weights[present] / np.mean(weights[present])
+    weights[present] = np.clip(weights[present], clip_min, clip_max)
+    return weights.astype(np.float32)
+
+
+def get_multiclass_class_weights(labels, model_opts):
+    num_classes = model_opts.get('num_classes', int(np.max(labels)) + 1)
+    counts = print_class_distribution(labels, num_classes, title='Training class distribution')
+    strategy = model_opts.get('class_weight_strategy', 'effective_number')
+    if strategy != 'effective_number':
+        raise ValueError('Unsupported class_weight_strategy for multiclass: {}'.format(strategy))
+    weights = effective_number_class_weights(
+        counts,
+        beta=model_opts.get('class_weight_beta', 0.9999),
+        clip_min=model_opts.get('class_weight_clip_min', 0.25),
+        clip_max=model_opts.get('class_weight_clip_max', 5.0))
+    print("### Effective-number class weights ###")
+    for class_idx, weight in enumerate(weights):
+        print("class {:02d}: {:.6f}".format(class_idx, float(weight)))
+    return weights
+
+
+def weighted_sparse_focal_loss(class_weights, gamma=2.0):
+    class_weights = tf.constant(class_weights, dtype=tf.float32)
+
+    def loss_func(y_true, y_pred):
+        y_true = tf.cast(tf.reshape(y_true, [-1]), tf.int32)
+        logits = tf.cast(y_pred, tf.float32)
+        ce = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=y_true, logits=logits)
+        probs = tf.nn.softmax(logits, axis=-1)
+        true_probs = tf.reduce_sum(tf.one_hot(y_true, tf.shape(logits)[-1]) * probs, axis=-1)
+        sample_weights = tf.gather(class_weights, y_true)
+        focal_factor = tf.pow(1.0 - true_probs, gamma)
+        return tf.reduce_mean(sample_weights * focal_factor * ce)
+
+    return loss_func
+
+
 def run(config_path, auxiliary_loss, test, resume, fresh=False):
     with open(config_path, 'r') as f:
         configs = yaml.safe_load(f)
@@ -241,7 +303,23 @@ def run(config_path, auxiliary_loss, test, resume, fresh=False):
     if not test:
         optimizer = get_optimizer(configs['model_opts']['optimizer'])(learning_rate=configs['model_opts']['lr'])
         if configs['model_opts'].get('label_format') == 'multiclass':
-            tamformer.compile(loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+            classifier_loss = configs['model_opts'].get('classifier_loss', 'sparse_categorical_crossentropy')
+            if classifier_loss == 'weighted_focal_loss':
+                train_labels = get_multiclass_labels(data_train)
+                class_weights = get_multiclass_class_weights(train_labels, configs['model_opts'])
+                loss = weighted_sparse_focal_loss(
+                    class_weights,
+                    gamma=configs['model_opts'].get('focal_gamma', 2.0))
+                print("### Multiclass loss: weighted_focal_loss ###")
+                print("### Focal gamma: {:.4f} ###".format(configs['model_opts'].get('focal_gamma', 2.0)))
+            else:
+                if configs['model_opts'].get('print_class_distribution', False):
+                    train_labels = get_multiclass_labels(data_train)
+                    print_class_distribution(train_labels, configs['model_opts'].get('num_classes', 21),
+                                             title='Training class distribution')
+                loss = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+                print("### Multiclass loss: sparse_categorical_crossentropy ###")
+            tamformer.compile(loss=loss,
                               optimizer=optimizer,
                               metrics=[tf.keras.metrics.SparseCategoricalAccuracy(name='accuracy')])
         else:
@@ -282,6 +360,13 @@ def run(config_path, auxiliary_loss, test, resume, fresh=False):
     if configs['model_opts'].get('label_format') == 'multiclass':
         y_true = test_data['data'][1]
         y_pred = np.argmax(test_results, axis=-1)
+        if configs['model_opts'].get('print_class_distribution', False):
+            print_class_distribution(np.asarray(y_true).astype(np.int32),
+                                     configs['model_opts'].get('num_classes', 21),
+                                     title='Test true class distribution')
+            print_class_distribution(np.asarray(y_pred).astype(np.int32),
+                                     configs['model_opts'].get('num_classes', 21),
+                                     title='Test predicted class distribution')
         save_inference_samples(test_data['data'][0],
                                configs['model_opts']['obs_input_type'],
                                os.path.join(image_output_dir(configs['model_opts'], prefix), 'inference_samples'),
