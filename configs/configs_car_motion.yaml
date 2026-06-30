@@ -27,11 +27,11 @@ model_opts:
   dropout: 0.1
   classifier_activation: linear
   classifier_loss: weighted_focal_loss
-  focal_gamma: 2.0
+  focal_gamma: 1.5
   class_weight_strategy: effective_number
-  class_weight_beta: 0.9999
-  class_weight_clip_min: 0.25
-  class_weight_clip_max: 5.0
+  class_weight_beta: 0.999
+  class_weight_clip_min: 0.5
+  class_weight_clip_max: 3.0
   print_class_distribution: True
   epochs: 20
   optimizer: adam
