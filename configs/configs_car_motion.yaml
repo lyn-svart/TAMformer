@@ -46,6 +46,7 @@ model_opts:
   feat_size: [4, 512]
   target_dim: [224, 224]
   local_context_input: raw
+  cache_context_features: false
   partial_weight_loading: True
 data_opts:
   train_annotation_file: /home/bkaradurak/Projects/ObjectMotionDetection/02-Source/PreventionData/Train.json

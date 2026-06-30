@@ -120,6 +120,102 @@ class DataGenerator(Sequence):
         new_X = X.copy()/52.014
         return new_X
 
+    def _bbox_sanity_check(self, img_size, bbox):
+        img_width, img_height = img_size
+        if bbox[0] < 0:
+            bbox[0] = 0.0
+        if bbox[1] < 0:
+            bbox[1] = 0.0
+        if bbox[2] >= img_width:
+            bbox[2] = img_width - 1
+        if bbox[3] >= img_height:
+            bbox[3] = img_height - 1
+        return bbox
+
+    def _img_pad(self, img, mode='warp', size=224):
+        image = np.copy(img)
+        if mode == 'warp':
+            return cv2.resize(img, (size, size))
+        if mode in ['pad_same', 'pad_resize', 'pad_fit']:
+            img_size = image.shape[:2][::-1]
+            ratio = float(size) / max(img_size)
+            if mode == 'pad_resize' or (mode == 'pad_fit' and (img_size[0] > size or img_size[1] > size)):
+                img_size = tuple([int(img_size[0] * ratio), int(img_size[1] * ratio)])
+                image = cv2.resize(image, img_size)
+            padded_image = np.zeros((size, size) + (image.shape[-1],), dtype=img.dtype)
+            w_off = (size - img_size[0]) // 2
+            h_off = (size - img_size[1]) // 2
+            padded_image[h_off:h_off + img_size[1], w_off:w_off + img_size[0], :] = image
+            return padded_image
+        return image
+
+    def _squarify(self, bbox, squarify_ratio, img_width):
+        width = abs(bbox[0] - bbox[2])
+        height = abs(bbox[1] - bbox[3])
+        width_change = height * squarify_ratio - width
+        bbox[0] = bbox[0] - width_change / 2
+        bbox[2] = bbox[2] + width_change / 2
+        if bbox[0] < 0:
+            bbox[0] = 0
+        if bbox[2] > img_width:
+            bbox[0] = bbox[0] - bbox[2] + img_width
+            bbox[2] = img_width
+        return bbox
+
+    def _jitter_bbox(self, img_path, bbox, mode, ratio):
+        if mode == 'same':
+            return bbox
+        img = load_img(img_path)
+        jitter_ratio = abs(ratio) if mode in ['random_enlarge', 'enlarge'] else ratio
+        jit_boxes = []
+        for b in bbox:
+            b = list(b)
+            bbox_width = b[2] - b[0]
+            bbox_height = b[3] - b[1]
+            width_change = bbox_width * jitter_ratio
+            height_change = bbox_height * jitter_ratio
+            if width_change < height_change:
+                height_change = width_change
+            else:
+                width_change = height_change
+            if mode in ['enlarge', 'random_enlarge']:
+                b[0] = b[0] - width_change // 2
+                b[1] = b[1] - height_change // 2
+            else:
+                b[0] = b[0] + width_change // 2
+                b[1] = b[1] + height_change // 2
+            b[2] = b[2] + width_change // 2
+            b[3] = b[3] + height_change // 2
+            jit_boxes.append(self._bbox_sanity_check(img.size, b))
+        return jit_boxes
+
+    def _load_context_crop(self, img_path, bbox):
+        target_dim = tuple(self.opts.get('target_dim', (224, 224)))
+        enlarge_ratio = self.opts.get('enlarge_ratio', 1.5)
+        imp = img_path.replace('_flip', '') if 'flip' in img_path else img_path
+        flip_image = '_flip' in img_path
+        img_data = cv2.imread(imp)
+        if img_data is None:
+            raise ValueError('Could not read image: {}'.format(imp))
+        if flip_image:
+            img_data = cv2.flip(img_data, 1)
+        bbox = self._jitter_bbox(imp, [bbox], 'enlarge', enlarge_ratio)[0]
+        bbox = self._squarify(bbox, 1, img_data.shape[1])
+        bbox = list(map(int, bbox[0:4]))
+        cropped_image = img_data[bbox[1]:bbox[3], bbox[0]:bbox[2], :]
+        return self._img_pad(cropped_image, mode='pad_resize', size=target_dim[0])
+
+    def _box_input_index(self):
+        for idx, input_type in enumerate(self.input_type_list):
+            if input_type == 'box' or 'box' in input_type:
+                return idx
+        return None
+
+    def _uses_on_the_fly_context(self, input_type):
+        return ('context' in input_type
+                and self.opts.get('local_context_input') == 'raw'
+                and not self.opts.get('cache_context_features', True))
+
     def _generate_X(self, indices):
         X = []
         for input_type_idx, input_type in enumerate(self.input_type_list):
@@ -128,14 +224,20 @@ class DataGenerator(Sequence):
                 noise = np.random.normal(0,1, (self.data_sizes[input_type_idx][0], self.data_sizes[input_type_idx][1]))
                 prob = rn.uniform(0,1)
                 if isinstance(self.data[input_type_idx][index][0], str):
-                    cached_path_list = self.data[input_type_idx][index]
-                    for j, cached_path in enumerate(cached_path_list):
-                        img_features = self._get_img_features(cached_path)
-
-                        if len(cached_path_list) == 1:
-                            features_batch[i, ] = img_features
-                        else:
+                    path_list = self.data[input_type_idx][index]
+                    if self._uses_on_the_fly_context(input_type):
+                        box_idx = self._box_input_index()
+                        for j, img_path in enumerate(path_list):
+                            bbox = self.data[box_idx][index][j]
+                            img_features = self._load_context_crop(img_path, bbox)
                             features_batch[i, j, ] = img_features
+                    else:
+                        for j, cached_path in enumerate(path_list):
+                            img_features = self._get_img_features(cached_path)
+                            if len(path_list) == 1:
+                                features_batch[i, ] = img_features
+                            else:
+                                features_batch[i, j, ] = img_features
                 else:
                     features_batch[i, ] = self.data[input_type_idx][index]
             if 'box' in input_type:
@@ -398,6 +500,13 @@ class DataGetter(object):
                   % (num_pos_samples, len(d[balance_tag]) - num_pos_samples))
 
     def get_context_data(self, data, feature_type):
+        if not self.model_opts.get('cache_context_features', True):
+            seq_len = np.asarray(data['box']).shape[1]
+            target_dim = tuple(self.model_opts.get('target_dim', (224, 224)))
+            feat_shape = (seq_len, target_dim[0], target_dim[1], 3)
+            print('Using on-the-fly {} crops for {} (no feature cache).'.format(feature_type, self.data_type))
+            return data['image'], feat_shape
+
         process = self.model_opts.get('process', True)
         if self.model_opts.get('local_context_input') == 'raw':
             process = False
@@ -561,10 +670,11 @@ class DataGetter(object):
         if process:
             assert (self._backbone in ['vgg16', 'resnet50', 'mobilenet']), "{} is not supported".format(self._backbone)
 
-        print("Initializing Preprocessin Model.......")
-        convnet =  backbone_dict[self._backbone](input_shape=(224, 224, 3), include_top=False, weights="imagenet")
-
-        print("Preprocessing Model Initialized........")
+        convnet = None
+        if process:
+            print("Initializing Preprocessin Model.......")
+            convnet = backbone_dict[self._backbone](input_shape=(224, 224, 3), include_top=False, weights="imagenet")
+            print("Preprocessing Model Initialized........")
         sequences = []
         bbox_seq = bbox_sequences.copy()
         i = -1

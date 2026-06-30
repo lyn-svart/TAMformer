@@ -290,17 +290,25 @@ def run(config_path, auxiliary_loss, test, resume, fresh=False):
     else:
         imdb = PIE(data_path= configs['data_opts']['path_to_dataset'])
 
-    data_raw_train = imdb.generate_data_trajectory_sequence('train', **configs['data_opts'])
-    data_raw_test = imdb.generate_data_trajectory_sequence('test', **configs['data_opts'])
-    data_raw_val = imdb.generate_data_trajectory_sequence('val', **configs['data_opts'])
+    if test:
+        print('Test-only mode: skipping train/val preprocessing.')
+        data_raw_test = imdb.generate_data_trajectory_sequence('test', **configs['data_opts'])
+        data_getter_test = DataGetter('test', data_raw_test, configs['model_opts'])
+        test_data = data_getter_test.get_data()
+        data_train = None
+        val_data = None
+    else:
+        data_raw_train = imdb.generate_data_trajectory_sequence('train', **configs['data_opts'])
+        data_raw_test = imdb.generate_data_trajectory_sequence('test', **configs['data_opts'])
+        data_raw_val = imdb.generate_data_trajectory_sequence('val', **configs['data_opts'])
 
-    data_getter_train = DataGetter('train', data_raw_train, configs['model_opts'])
-    data_getter_test = DataGetter('test', data_raw_test, configs['model_opts'])
-    data_getter_val = DataGetter('val', data_raw_val, configs['model_opts'])
+        data_getter_train = DataGetter('train', data_raw_train, configs['model_opts'])
+        data_getter_test = DataGetter('test', data_raw_test, configs['model_opts'])
+        data_getter_val = DataGetter('val', data_raw_val, configs['model_opts'])
 
-    data_train = data_getter_train.get_data()
-    test_data = data_getter_test.get_data()
-    val_data = data_getter_val.get_data()
+        data_train = data_getter_train.get_data()
+        test_data = data_getter_test.get_data()
+        val_data = data_getter_val.get_data()
 
     tamformer = TAMformer(configs['model_opts'], auxiliary_loss).tamformer()
     model_name = configs['model_opts']['model_path']\
