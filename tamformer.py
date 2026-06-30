@@ -67,8 +67,6 @@ class TransformerBlock(layers.Layer):
 
     def call(self, inputs, training=None, attention_mask=None):
         if self.cross_attention:
-            if training is False:
-                attention_mask = tf.round(attention_mask)
             attn_output = self.att(inputs[0], inputs[1], attention_mask=attention_mask)
             attn_output = self.dropout1(attn_output, training=training)
             if self.normalization:
@@ -76,8 +74,6 @@ class TransformerBlock(layers.Layer):
             else:
                 out1 = inputs[0] + attn_output
         else:
-            if training is False:
-                attention_mask = tf.round(attention_mask)
             attn_output = self.att(inputs, inputs, attention_mask=attention_mask)
             attn_output = self.dropout1(attn_output, training=training)
             if self.normalization:
