@@ -50,7 +50,7 @@ model_opts:
 data_opts:
   train_annotation_file: /home/bkaradurak/Projects/ObjectMotionDetection/02-Source/PreventionData/Train.json
   validation_annotation_file: /home/bkaradurak/Projects/ObjectMotionDetection/02-Source/PreventionData/Validation.json
-  test_annotation_file: /home/bkaradurak/Projects/ObjectMotionDetection/02-Source/PreventionData/Validation.json
+  test_annotation_file: /home/bkaradurak/Projects/ObjectMotionDetection/02-Source/PreventionData/Test.json
   path_to_dataset: /home/bkaradurak/Projects/ObjectMotionDetection/02-Source/PreventionData/
   object_types: []
   ignored_object_types: [Human]
