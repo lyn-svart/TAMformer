@@ -3,6 +3,14 @@ from jaad_data import JAAD
 from car_motion_data import CarMotion
 from data_generator import DataGenerator, DataGetter
 from tamformer import TAMformer
+from motion_labels import CLASS_ID_TO_NAME
+from result_logging import (
+    default_results_dir,
+    format_motion_metrics_line,
+    format_per_class_metrics,
+    test_log_path,
+    write_test_results,
+)
 import os
 import sys
 import yaml
@@ -43,7 +51,7 @@ K.set_session(sess)
 
 from tensorflow.keras.metrics import AUC
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, mean_squared_error, mean_absolute_error
-from sklearn.metrics import roc_auc_score, roc_curve, precision_recall_curve
+from sklearn.metrics import roc_auc_score, roc_curve, precision_recall_curve, classification_report
 from tensorflow.keras.optimizers import Adam, SGD, RMSprop
 from tensorflow import keras
 
@@ -275,6 +283,346 @@ def weighted_sparse_focal_loss(class_weights, gamma=2.0):
     return loss_func
 
 
+def _softmax_scores(logits):
+    logits = np.asarray(logits, dtype=np.float64)
+    logits = logits - np.max(logits, axis=-1, keepdims=True)
+    exp = np.exp(logits)
+    return exp / np.sum(exp, axis=-1, keepdims=True)
+
+
+def _motion_class_name(class_id):
+    return CLASS_ID_TO_NAME.get(int(class_id), str(int(class_id)))
+
+
+def _print_sample_inferences(y_true, y_pred, y_scores, sample_count=5):
+    if sample_count <= 0:
+        return
+    total = len(y_true)
+    if total == 0:
+        print("No test samples available for sample inference preview.")
+        return
+
+    sample_count = min(int(sample_count), total)
+    print("\nSample inferences ({} of {}):".format(sample_count, total))
+    for i in range(sample_count):
+        pred_class = int(y_pred[i])
+        true_class = int(y_true[i])
+        confidence = float(y_scores[i][pred_class])
+        print(
+            "  [{}] true={} ({}) pred={} ({}) conf={:.4f}".format(
+                i,
+                true_class,
+                _motion_class_name(true_class),
+                pred_class,
+                _motion_class_name(pred_class),
+                confidence,
+            )
+        )
+
+
+def _print_per_class_metrics(y_true, y_pred, y_scores, num_classes, class_names=None):
+    text = format_per_class_metrics(y_true, y_pred, y_scores, num_classes, class_names)
+    print(text)
+    return text
+
+
+def _safe_imread(path):
+    try:
+        return cv2.imread(str(path))
+    except Exception:
+        return None
+
+
+def _draw_label(img_bgr, text):
+    if img_bgr is None:
+        return None
+    img = img_bgr
+    cv2.rectangle(img, (0, 0), (img.shape[1], 30), (0, 0, 0), -1)
+    cv2.putText(img, text, (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 0), 2, cv2.LINE_AA)
+    return img
+
+
+def _mosaic_grid(images_bgr, rows=3, cols=3, tile_size=360):
+    total = rows * cols
+    tiles = []
+    for i in range(total):
+        if i < len(images_bgr) and images_bgr[i] is not None:
+            tile = cv2.resize(images_bgr[i], (tile_size, tile_size), interpolation=cv2.INTER_AREA)
+        else:
+            tile = np.zeros((tile_size, tile_size, 3), dtype=np.uint8)
+        tiles.append(tile)
+    grid_rows = []
+    for r in range(rows):
+        grid_rows.append(np.hstack(tiles[r * cols:(r + 1) * cols]))
+    return np.vstack(grid_rows)
+
+
+def _safe_bbox_int(box, img_w, img_h):
+    x1, y1, x2, y2 = [int(round(float(v))) for v in box[0:4]]
+    x1 = max(0, min(x1, img_w - 1))
+    x2 = max(0, min(x2, img_w - 1))
+    y1 = max(0, min(y1, img_h - 1))
+    y2 = max(0, min(y2, img_h - 1))
+    if x2 < x1:
+        x1, x2 = x2, x1
+    if y2 < y1:
+        y1, y2 = y2, y1
+    return x1, y1, x2, y2
+
+
+def _resolve_visual_crop_type(obs_input_type):
+    for d in obs_input_type:
+        if 'local_box' in d:
+            return 'bbox'
+        if 'local_context' in d:
+            return 'context'
+        if 'surround' in d:
+            return 'surround'
+        if 'scene_context' in d:
+            return 'none'
+    return 'bbox'
+
+
+def _context_bbox(box, img_w, img_h, enlarge_ratio=1.5):
+    x1, y1, x2, y2 = [float(v) for v in box[0:4]]
+    cx = (x1 + x2) / 2.0
+    cy = (y1 + y2) / 2.0
+    w = max(1.0, (x2 - x1))
+    h = max(1.0, (y2 - y1))
+    side = max(w, h) * float(enlarge_ratio)
+    nx1 = int(round(cx - side / 2.0))
+    ny1 = int(round(cy - side / 2.0))
+    nx2 = int(round(cx + side / 2.0))
+    ny2 = int(round(cy + side / 2.0))
+    nx1 = max(0, min(nx1, img_w - 1))
+    nx2 = max(0, min(nx2, img_w - 1))
+    ny1 = max(0, min(ny1, img_h - 1))
+    ny2 = max(0, min(ny2, img_h - 1))
+    if nx2 <= nx1:
+        nx2 = min(img_w - 1, nx1 + 1)
+    if ny2 <= ny1:
+        ny2 = min(img_h - 1, ny1 + 1)
+    return nx1, ny1, nx2, ny2
+
+
+def _crop_for_visual_sample(img, box, crop_type='bbox', enlarge_ratio=1.5):
+    if img is None:
+        return None
+    h, w = img.shape[:2]
+    x1, y1, x2, y2 = _safe_bbox_int(box, w, h)
+    if crop_type == 'none':
+        out = img.copy()
+        cv2.rectangle(out, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        return out
+    if crop_type == 'bbox':
+        return img[y1:y2 + 1, x1:x2 + 1].copy()
+    if crop_type == 'context':
+        cx1, cy1, cx2, cy2 = _context_bbox([x1, y1, x2, y2], w, h, enlarge_ratio=enlarge_ratio)
+        return img[cy1:cy2 + 1, cx1:cx2 + 1].copy()
+    if crop_type == 'surround':
+        cx1, cy1, cx2, cy2 = _context_bbox([x1, y1, x2, y2], w, h, enlarge_ratio=enlarge_ratio)
+        out = img[cy1:cy2 + 1, cx1:cx2 + 1].copy()
+        rx1 = max(0, x1 - cx1)
+        rx2 = min(out.shape[1] - 1, x2 - cx1)
+        ry1 = max(0, y1 - cy1)
+        ry2 = min(out.shape[0] - 1, y2 - cy1)
+        out[ry1:ry2 + 1, rx1:rx2 + 1, :] = 128
+        return out
+    return img.copy()
+
+
+def _render_preview_tile(img, box, crop_type, enlarge_ratio, target_dim):
+    cropped = _crop_for_visual_sample(img, box, crop_type=crop_type, enlarge_ratio=enlarge_ratio)
+    if cropped is None:
+        return None
+    if isinstance(target_dim, (list, tuple)) and len(target_dim) >= 2:
+        tw, th = int(target_dim[0]), int(target_dim[1])
+    else:
+        tw, th = int(target_dim), int(target_dim)
+    tw = max(1, tw)
+    th = max(1, th)
+    return cv2.resize(cropped, (tw, th), interpolation=cv2.INTER_AREA)
+
+
+def _sample_diverse_indices(total, count):
+    if total <= 0 or count <= 0:
+        return []
+    if count >= total:
+        return list(range(total))
+    idxs = np.linspace(0, total - 1, num=count, dtype=int).tolist()
+    deduped = []
+    seen = set()
+    for i in idxs:
+        if i not in seen:
+            deduped.append(i)
+            seen.add(i)
+    if len(deduped) < count:
+        for i in range(total):
+            if i not in seen:
+                deduped.append(i)
+                seen.add(i)
+            if len(deduped) >= count:
+                break
+    return deduped[:count]
+
+
+def _extract_record_drive_frame(frame_path):
+    norm = str(frame_path).replace("\\", "/")
+    parts = [p for p in norm.split("/") if p]
+    frame_name = os.path.basename(norm)
+    record = "UNKNOWN_RECORD"
+    drive = "UNKNOWN_DRIVE"
+    for p in parts:
+        if p.startswith("RECORD"):
+            record = p
+        if p.startswith("DRIVE"):
+            drive = p
+    return record, drive, frame_name
+
+
+def _save_visual_inference_samples(
+        data_raw,
+        y_true,
+        y_pred,
+        y_scores,
+        out_dir,
+        sample_count=3,
+        num_frames=9,
+        crop_type='bbox',
+        enlarge_ratio=1.5,
+        target_dim=(224, 224),
+        draw_header=False):
+    if sample_count <= 0:
+        return
+    if not data_raw or 'image' not in data_raw or 'bbox' not in data_raw:
+        print("Visual samples skipped: raw image/bbox sequences not available.")
+        return
+
+    os.makedirs(out_dir, exist_ok=True)
+    n = min(len(y_true), len(data_raw['image']), len(data_raw['bbox']))
+    if n <= 0:
+        print("Visual samples skipped: no test samples available.")
+        return
+
+    sample_count = min(int(sample_count), n)
+    num_frames = max(1, min(int(num_frames), 9))
+    sample_indices = _sample_diverse_indices(n, sample_count)
+    print("\nSaving visual inference samples to:", out_dir)
+    print("Diverse sample indices:", sample_indices)
+    for out_i, i in enumerate(sample_indices):
+        seq_imgs = data_raw['image'][i]
+        seq_boxes = data_raw['bbox'][i]
+        if not seq_imgs:
+            continue
+
+        k = min(num_frames, len(seq_imgs))
+        frames = list(zip(seq_imgs[-k:], seq_boxes[-k:]))
+        rendered = []
+        for frame_path, box in frames:
+            img = _safe_imread(frame_path)
+            if img is None:
+                rendered.append(None)
+                continue
+            rendered.append(_render_preview_tile(
+                img, box, crop_type=crop_type, enlarge_ratio=enlarge_ratio, target_dim=target_dim))
+
+        last_frame_path = seq_imgs[-1]
+        record, drive, frame_name = _extract_record_drive_frame(last_frame_path)
+        conf = float(y_scores[i][int(y_pred[i])])
+        pred_token = str(int(y_pred[i]))
+        header = "idx={} true={} pred={} conf={:.3f} crop={} {} {} {}".format(
+            int(i), int(y_true[i]), pred_token, conf, crop_type, record, drive, frame_name)
+        mosaic = _mosaic_grid(rendered, rows=3, cols=3, tile_size=360)
+        if draw_header:
+            mosaic = _draw_label(mosaic, header)
+        out_name = "test_sample_{:03d}_idx{:05d}_{}_{}_{}_t{}_p{}_c{:.3f}.jpg".format(
+            int(out_i), int(i), record, drive, os.path.splitext(frame_name)[0],
+            int(y_true[i]), pred_token, conf)
+        out_path = os.path.join(out_dir, out_name)
+        cv2.imwrite(out_path, mosaic)
+        print("  saved:", out_path)
+
+
+def _evaluate_multiclass_motion_test(config_path, configs, model_opts, test_data, test_results,
+                                     data_raw_test, weights_path, prefix):
+    num_classes = model_opts.get('num_classes', 21)
+    y_true = np.asarray(test_data['data'][1]).astype(int)
+    y_scores = _softmax_scores(test_results)
+    y_pred = np.argmax(y_scores, axis=1)
+
+    if model_opts.get('print_class_distribution', False):
+        print_class_distribution(y_true, num_classes, title='Test true class distribution')
+        print_class_distribution(y_pred, num_classes, title='Test predicted class distribution')
+
+    acc = accuracy_score(y_true, y_pred)
+    f1_macro = f1_score(y_true, y_pred, average='macro', zero_division=0)
+    f1_weighted = f1_score(y_true, y_pred, average='weighted', zero_division=0)
+    precision_macro = precision_score(y_true, y_pred, average='macro', zero_division=0)
+    recall_macro = recall_score(y_true, y_pred, average='macro', zero_division=0)
+    try:
+        y_true_one_hot = keras.utils.to_categorical(y_true, num_classes=num_classes)
+        auc_macro = roc_auc_score(y_true_one_hot, y_scores, multi_class='ovr', average='macro')
+    except ValueError:
+        auc_macro = 0.0
+
+    motion_line = format_motion_metrics_line(
+        'motion', acc, auc_macro, f1_macro, f1_weighted, precision_macro, recall_macro)
+    print(motion_line)
+    motion_per_class = _print_per_class_metrics(
+        y_true, y_pred, y_scores, num_classes, CLASS_ID_TO_NAME)
+
+    labels = list(range(num_classes))
+    target_names = [CLASS_ID_TO_NAME.get(i, str(i)) for i in labels]
+    sk_report = classification_report(
+        y_true, y_pred, labels=labels, target_names=target_names, zero_division=0, digits=3)
+    print("\nSklearn classification report:\n{}".format(sk_report))
+
+    results_dir = default_results_dir(model_opts.get('model_path', './models'))
+    test_out = test_log_path(results_dir)
+    write_test_results(test_out, [
+        "config_file: {}".format(config_path),
+        "weights: {}".format(weights_path),
+        motion_line,
+        motion_per_class,
+        sk_report,
+    ])
+    print("Test results written to:", test_out)
+
+    sample_inference_count = model_opts.get('sample_inference_count', 5)
+    _print_sample_inferences(y_true, y_pred, y_scores, sample_inference_count)
+
+    inference_sample_count = model_opts.get('inference_sample_count', 0)
+    if inference_sample_count > 0:
+        save_inference_samples(
+            test_data['data'][0],
+            model_opts['obs_input_type'],
+            os.path.join(image_output_dir(model_opts, prefix), 'inference_samples'),
+            predictions=test_results,
+            labels=y_true,
+            sample_count=inference_sample_count)
+
+    visual_sample_count = int(model_opts.get('visual_sample_count', 0))
+    if visual_sample_count > 0:
+        visual_crop_type = model_opts.get('visual_sample_crop_type', 'auto')
+        if visual_crop_type == 'auto':
+            visual_crop_type = _resolve_visual_crop_type(model_opts.get('obs_input_type', []))
+        _save_visual_inference_samples(
+            data_raw_test,
+            y_true,
+            y_pred,
+            y_scores,
+            out_dir=model_opts.get(
+                'visual_sample_out_dir',
+                os.path.join(model_opts.get('model_path', './models'), 'visual_samples')),
+            sample_count=visual_sample_count,
+            num_frames=int(model_opts.get('visual_sample_frames', 9)),
+            crop_type=visual_crop_type,
+            enlarge_ratio=float(model_opts.get('enlarge_ratio', 1.5)),
+            target_dim=model_opts.get('target_dim', (224, 224)),
+            draw_header=bool(model_opts.get('visual_sample_draw_header', False)),
+        )
+
+
 def run(config_path, auxiliary_loss, test, resume, fresh=False):
     with open(config_path, 'r') as f:
         configs = yaml.safe_load(f)
@@ -321,9 +669,11 @@ def run(config_path, auxiliary_loss, test, resume, fresh=False):
     prefix = checkpoint_prefix(model_name)
     checkpoint_path, checkpoint_epoch = latest_checkpoint(ckpt_dir, prefix)
     initial_epoch = 0
+    loaded_weights_path = model_name
 
     if test or resume:
         weights_to_load = checkpoint_path if checkpoint_path is not None else model_name
+        loaded_weights_path = weights_to_load
         print("Loading "+weights_to_load+" ...")
         partial_loading = configs['model_opts'].get('partial_weight_loading', False) and checkpoint_path is None
         tamformer.load_weights(weights_to_load, by_name=partial_loading, skip_mismatch=partial_loading)
@@ -386,28 +736,22 @@ def run(config_path, auxiliary_loss, test, resume, fresh=False):
 
         tamformer = TAMformer(configs['model_opts'], auxiliary_loss).tamformer()
         checkpoint_path, _ = latest_checkpoint(ckpt_dir, prefix)
-        tamformer.load_weights(checkpoint_path if checkpoint_path is not None else model_name)
+        loaded_weights_path = checkpoint_path if checkpoint_path is not None else model_name
+        tamformer.load_weights(loaded_weights_path)
 
     print("Testing ...")
     test_results = tamformer.predict(test_data['data'][0], verbose=1)
     if configs['model_opts'].get('label_format') == 'multiclass':
-        y_true = test_data['data'][1]
-        y_pred = np.argmax(test_results, axis=-1)
-        if configs['model_opts'].get('print_class_distribution', False):
-            print_class_distribution(np.asarray(y_true).astype(np.int32),
-                                     configs['model_opts'].get('num_classes', 21),
-                                     title='Test true class distribution')
-            print_class_distribution(np.asarray(y_pred).astype(np.int32),
-                                     configs['model_opts'].get('num_classes', 21),
-                                     title='Test predicted class distribution')
-        save_inference_samples(test_data['data'][0],
-                               configs['model_opts']['obs_input_type'],
-                               os.path.join(image_output_dir(configs['model_opts'], prefix), 'inference_samples'),
-                               predictions=test_results,
-                               labels=y_true,
-                               sample_count=configs['model_opts'].get('inference_sample_count', 8))
-        print('acc:', accuracy_score(y_true, y_pred),
-              '- macro_f1:', f1_score(y_true, y_pred, average='macro'))
+        _evaluate_multiclass_motion_test(
+            config_path,
+            configs,
+            configs['model_opts'],
+            test_data,
+            test_results,
+            data_raw_test,
+            loaded_weights_path,
+            prefix,
+        )
         return
     best_perf_acc = [0 for i in range(40)]
     best_perf_auc = [0 for i in range(40)]

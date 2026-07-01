@@ -21,3 +21,6 @@ MOTION_TO_CLASS = {
     'ra-yield': 19,
     'intent to cross': 20,
 }
+
+NUM_MOTION_CLASSES = len(MOTION_TO_CLASS)
+CLASS_ID_TO_NAME = {v: k for k, v in MOTION_TO_CLASS.items()}

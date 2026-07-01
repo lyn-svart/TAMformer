@@ -41,7 +41,13 @@ model_opts:
   debug_output_dir: ./models/debug_outputs
   batch_log_interval: 1000
   debug_sample_count: 3
-  inference_sample_count: 8
+  inference_sample_count: 0
+  sample_inference_count: 5
+  visual_sample_count: 3
+  visual_sample_frames: 9
+  visual_sample_out_dir: ./models/visual_samples
+  visual_sample_crop_type: auto
+  visual_sample_draw_header: false
   step: 1
   feat_size: [4, 512]
   target_dim: [224, 224]
