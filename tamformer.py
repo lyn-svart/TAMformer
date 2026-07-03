@@ -144,7 +144,7 @@ class TAMformer(object):
                               include_top=False,
                               weights=backbone_weights,
                               pooling='max')
-        backbone.trainable = self.model_opts.get('trainable_backbone', True)
+        backbone.trainable = not self.model_opts.get('freeze_backbone', False)
         processed = Lambda(lambda x: vgg16.preprocess_input(x), name='vgg16_preprocess')(context_input)
         context_features = layers.TimeDistributed(backbone, name='local_context_vgg16')(processed)
         if context_features.shape[-1] != feat_size:

@@ -3,6 +3,7 @@ model_opts:
   backbone: vgg16
   backbone_weights: imagenet
   trainable_backbone: True
+  freeze_backbone: True  # keep VGG16 weights fixed when trainable_backbone is True
   obs_input_type: [box, local_context]
   enabled_modalities: [box, local_context]
   pose_enabled: False
@@ -33,11 +34,13 @@ model_opts:
   class_weight_clip_min: 0.5
   class_weight_clip_max: 3.0
   print_class_distribution: True
-  epochs: 20
+  epochs: 100
   optimizer: adam
   lr: 0.0001
   model_path: ./models
   checkpoint_dir: ./models/checkpoints
+  checkpoint_monitor: loss  # metric for best-model selection (e.g. val_accuracy)
+  checkpoint_mode: min          # min for loss metrics, max for accuracy metrics
   debug_output_dir: ./models/debug_outputs
   batch_log_interval: 1000
   debug_sample_count: 3

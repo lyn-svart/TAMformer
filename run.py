@@ -82,6 +82,31 @@ def latest_checkpoint(checkpoint_dir, prefix):
     return path, epoch
 
 
+def best_checkpoint_path(checkpoint_dir, prefix):
+    return os.path.join(checkpoint_dir, prefix + '_best.h5')
+
+
+def resolve_eval_weights_path(checkpoint_dir, prefix, model_name):
+    best_path = best_checkpoint_path(checkpoint_dir, prefix)
+    if os.path.isfile(best_path):
+        return best_path
+    checkpoint_path, _ = latest_checkpoint(checkpoint_dir, prefix)
+    if checkpoint_path is not None:
+        return checkpoint_path
+    return model_name
+
+
+def checkpoint_monitor_settings(model_opts):
+    monitor = model_opts.get('checkpoint_monitor', 'val_loss')
+    if 'checkpoint_mode' in model_opts:
+        mode = model_opts['checkpoint_mode']
+    elif monitor.endswith('loss'):
+        mode = 'min'
+    else:
+        mode = 'max'
+    return monitor, mode
+
+
 def image_output_dir(model_opts, name):
     base_dir = model_opts.get('debug_output_dir',
                               os.path.join(model_opts['model_path'], 'debug_outputs'))
@@ -672,10 +697,14 @@ def run(config_path, auxiliary_loss, test, resume, fresh=False):
     loaded_weights_path = model_name
 
     if test or resume:
-        weights_to_load = checkpoint_path if checkpoint_path is not None else model_name
+        if test:
+            weights_to_load = resolve_eval_weights_path(ckpt_dir, prefix, model_name)
+        else:
+            weights_to_load = checkpoint_path if checkpoint_path is not None else model_name
         loaded_weights_path = weights_to_load
         print("Loading "+weights_to_load+" ...")
-        partial_loading = configs['model_opts'].get('partial_weight_loading', False) and checkpoint_path is None
+        partial_loading = (configs['model_opts'].get('partial_weight_loading', False)
+                           and weights_to_load == model_name)
         tamformer.load_weights(weights_to_load, by_name=partial_loading, skip_mismatch=partial_loading)
     elif not test and not fresh and checkpoint_path is not None:
         print("Resuming from checkpoint {} ...".format(checkpoint_path))
@@ -683,6 +712,9 @@ def run(config_path, auxiliary_loss, test, resume, fresh=False):
         initial_epoch = checkpoint_epoch
     elif fresh:
         print("Fresh training requested; existing checkpoints will be ignored.")
+        best_path = best_checkpoint_path(ckpt_dir, prefix)
+        if os.path.isfile(best_path):
+            os.remove(best_path)
     if not test:
         optimizer = get_optimizer(configs['model_opts']['optimizer'])(learning_rate=configs['model_opts']['lr'])
         if configs['model_opts'].get('label_format') == 'multiclass':
@@ -716,9 +748,19 @@ def run(config_path, auxiliary_loss, test, resume, fresh=False):
                               metrics=['accuracy'])
 
         checkpoint_template = os.path.join(ckpt_dir, prefix + '_epoch_{epoch:03d}.h5')
-        checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(filepath=checkpoint_template,
-                                                                 save_weights_only=True,
-                                                                 save_best_only=False)
+        epoch_checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(filepath=checkpoint_template,
+                                                                       save_weights_only=True,
+                                                                       save_best_only=False)
+        monitor, monitor_mode = checkpoint_monitor_settings(configs['model_opts'])
+        best_path = best_checkpoint_path(ckpt_dir, prefix)
+        best_checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(filepath=best_path,
+                                                                      save_weights_only=True,
+                                                                      save_best_only=True,
+                                                                      monitor=monitor,
+                                                                      mode=monitor_mode,
+                                                                      verbose=1)
+        print("Best model checkpoint: {} (monitor={}, mode={})".format(
+            best_path, monitor, monitor_mode))
         debug_callback = BatchDebugCallback(data_train['data'][0],
                                             configs['model_opts']['obs_input_type'],
                                             image_output_dir(configs['model_opts'], prefix),
@@ -731,13 +773,13 @@ def run(config_path, auxiliary_loss, test, resume, fresh=False):
                                 initial_epoch=initial_epoch,
                                 validation_data=val_data['data'][0],
                                 verbose=1,
-                                callbacks=[checkpoint_callback, debug_callback])
-        tamformer.save_weights(model_name)
-
-        tamformer = TAMformer(configs['model_opts'], auxiliary_loss).tamformer()
-        checkpoint_path, _ = latest_checkpoint(ckpt_dir, prefix)
-        loaded_weights_path = checkpoint_path if checkpoint_path is not None else model_name
+                                callbacks=[epoch_checkpoint_callback,
+                                           best_checkpoint_callback,
+                                           debug_callback])
+        loaded_weights_path = resolve_eval_weights_path(ckpt_dir, prefix, model_name)
+        print("Loading best weights for evaluation: {} ...".format(loaded_weights_path))
         tamformer.load_weights(loaded_weights_path)
+        tamformer.save_weights(model_name)
 
     print("Testing ...")
     test_results = tamformer.predict(test_data['data'][0], verbose=1)
