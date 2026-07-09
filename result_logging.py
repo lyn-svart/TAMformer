@@ -17,7 +17,9 @@ def training_log_path(results_dir: str) -> str:
     return os.path.join(results_dir, "training_results.txt")
 
 
-def test_log_path(results_dir: str) -> str:
+def test_log_path(results_dir: str, epoch: Optional[int] = None) -> str:
+    if epoch is not None:
+        return os.path.join(results_dir, "test_results_epoch_{:03d}.txt".format(epoch))
     return os.path.join(results_dir, "test_results.txt")
 
 
@@ -129,6 +131,19 @@ def format_per_class_metrics(
                 class_id, support, recall, precision, f1, avg_true_conf, avg_pred_conf, label,
             )
         )
+    return "\n".join(lines)
+
+
+def format_model_weights_section(weights_path, test_epoch=None):
+    lines = [
+        "Model weights:",
+        "  file: {}".format(os.path.basename(weights_path)),
+        "  path: {}".format(os.path.abspath(weights_path)),
+    ]
+    if test_epoch is not None:
+        lines.append("  checkpoint_epoch: {}".format(test_epoch))
+    else:
+        lines.append("  selection: auto (best checkpoint, else latest epoch)")
     return "\n".join(lines)
 
 

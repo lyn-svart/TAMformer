@@ -7,6 +7,7 @@ from motion_labels import CLASS_ID_TO_NAME
 from result_logging import (
     default_results_dir,
     format_motion_metrics_line,
+    format_model_weights_section,
     format_per_class_metrics,
     test_log_path,
     write_test_results,
@@ -84,6 +85,20 @@ def latest_checkpoint(checkpoint_dir, prefix):
 
 def best_checkpoint_path(checkpoint_dir, prefix):
     return os.path.join(checkpoint_dir, prefix + '_best.h5')
+
+
+def epoch_checkpoint_path(checkpoint_dir, prefix, epoch):
+    return os.path.join(checkpoint_dir, prefix + '_epoch_{:03d}.h5'.format(epoch))
+
+
+def resolve_test_weights_path(checkpoint_dir, prefix, model_name, test_epoch=None):
+    if test_epoch is not None:
+        epoch_path = epoch_checkpoint_path(checkpoint_dir, prefix, test_epoch)
+        if not os.path.isfile(epoch_path):
+            raise FileNotFoundError(
+                'Checkpoint for epoch {} not found: {}'.format(test_epoch, epoch_path))
+        return epoch_path
+    return resolve_eval_weights_path(checkpoint_dir, prefix, model_name)
 
 
 def resolve_eval_weights_path(checkpoint_dir, prefix, model_name):
@@ -569,7 +584,7 @@ def _save_visual_inference_samples(
 
 
 def _evaluate_multiclass_motion_test(config_path, configs, model_opts, test_data, test_results,
-                                     data_raw_test, weights_path, prefix):
+                                     data_raw_test, weights_path, prefix, test_epoch=None):
     num_classes = model_opts.get('num_classes', 21)
     y_true = np.asarray(test_data['data'][1]).astype(int)
     y_scores = _softmax_scores(test_results)
@@ -603,10 +618,10 @@ def _evaluate_multiclass_motion_test(config_path, configs, model_opts, test_data
     print("\nSklearn classification report:\n{}".format(sk_report))
 
     results_dir = default_results_dir(model_opts.get('model_path', './models'))
-    test_out = test_log_path(results_dir)
+    test_out = test_log_path(results_dir, test_epoch)
     write_test_results(test_out, [
         "config_file: {}".format(config_path),
-        "weights: {}".format(weights_path),
+        format_model_weights_section(weights_path, test_epoch),
         motion_line,
         motion_per_class,
         sk_report,
@@ -648,7 +663,7 @@ def _evaluate_multiclass_motion_test(config_path, configs, model_opts, test_data
         )
 
 
-def run(config_path, auxiliary_loss, test, resume, fresh=False):
+def run(config_path, auxiliary_loss, test, resume, fresh=False, test_epoch=None):
     with open(config_path, 'r') as f:
         configs = yaml.safe_load(f)
 
@@ -696,9 +711,12 @@ def run(config_path, auxiliary_loss, test, resume, fresh=False):
     initial_epoch = 0
     loaded_weights_path = model_name
 
+    if test_epoch is not None and not test:
+        raise ValueError('--test_epoch can only be used with --test')
+
     if test or resume:
         if test:
-            weights_to_load = resolve_eval_weights_path(ckpt_dir, prefix, model_name)
+            weights_to_load = resolve_test_weights_path(ckpt_dir, prefix, model_name, test_epoch)
         else:
             weights_to_load = checkpoint_path if checkpoint_path is not None else model_name
         loaded_weights_path = weights_to_load
@@ -793,6 +811,7 @@ def run(config_path, auxiliary_loss, test, resume, fresh=False):
             data_raw_test,
             loaded_weights_path,
             prefix,
+            test_epoch,
         )
         return
     best_perf_acc = [0 for i in range(40)]
@@ -899,6 +918,8 @@ if __name__ == '__main__':
     parser.add_argument('--resume', action='store_true')
     parser.add_argument('--fresh', action='store_true',
                         help='Start training from scratch and ignore existing checkpoints')
+    parser.add_argument('--test_epoch', type=int, default=None,
+                        help='Epoch checkpoint to load for --test (e.g. 5 loads epoch_005.h5)')
 
     args = parser.parse_args()
-    run(args.config_file, args.auxiliary_loss, args.test, args.resume, args.fresh)
+    run(args.config_file, args.auxiliary_loss, args.test, args.resume, args.fresh, args.test_epoch)
