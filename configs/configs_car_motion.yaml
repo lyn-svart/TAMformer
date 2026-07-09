@@ -25,6 +25,8 @@ model_opts:
   generator: True
   batch_size: 8
   val_batch_size: 8
+  fit_workers: 8
+  fit_max_queue_size: 10
   dropout: 0.1
   classifier_activation: linear
   classifier_loss: weighted_focal_loss
