@@ -206,20 +206,87 @@ class BatchDebugCallback(tf.keras.callbacks.Callback):
         self.sample_count = sample_count
         self.current_epoch = 0
         self.epoch_start_time = None
+        self.train_start_time = None
         self.batch_log_dir = os.path.join(output_dir, 'batch_logs')
         self.input_image_dir = os.path.join(output_dir, 'randomized_inputs')
+        self.batch_log_path = os.path.join(self.batch_log_dir, 'training_batches.txt')
         os.makedirs(self.batch_log_dir, exist_ok=True)
         os.makedirs(self.input_image_dir, exist_ok=True)
 
+    def _append_batch_log(self, message):
+        with open(self.batch_log_path, 'a', encoding='utf-8') as f:
+            f.write(message.rstrip() + '\n')
+
+    def _format_duration(self, seconds):
+        seconds = max(float(seconds), 0.0)
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = int(seconds % 60)
+        return '{}:{:02d}:{:02d}'.format(hours, minutes, secs)
+
+    def _format_metric_value(self, value):
+        try:
+            return '{:.6f}'.format(float(value))
+        except (TypeError, ValueError):
+            return str(value)
+
+    def _group_epoch_metrics(self, logs):
+        logs = logs or {}
+        train_metrics = []
+        val_metrics = []
+        other_metrics = []
+        for key in sorted(logs.keys()):
+            entry = '{}={}'.format(key, self._format_metric_value(logs[key]))
+            if key.startswith('val_'):
+                val_metrics.append(entry)
+            elif key in ('loss', 'accuracy', 'sparse_categorical_accuracy') or 'acc' in key.lower():
+                train_metrics.append(entry)
+            else:
+                other_metrics.append(entry)
+        return train_metrics, val_metrics, other_metrics
+
     def on_train_begin(self, logs=None):
+        self.train_start_time = time.time()
         save_random_generator_inputs(self.generator, self.input_types, self.input_image_dir,
                                      'train_begin', self.sample_count)
+        self._append_batch_log('=' * 72)
+        self._append_batch_log('Training started: {}'.format(
+            time.strftime('%Y-%m-%d %H:%M:%S')))
+        self._append_batch_log('Total batches per epoch: {}'.format(len(self.generator)))
+        self._append_batch_log('Batch log interval: {}'.format(self.log_interval))
+        self._append_batch_log('=' * 72)
 
     def on_epoch_begin(self, epoch, logs=None):
         self.current_epoch = epoch + 1
         self.epoch_start_time = time.time()
         save_random_generator_inputs(self.generator, self.input_types, self.input_image_dir,
                                      'epoch_{:03d}'.format(self.current_epoch), self.sample_count)
+        self._append_batch_log('')
+        self._append_batch_log('-' * 72)
+        self._append_batch_log('epoch {} begin | batches: {} | started: {}'.format(
+            self.current_epoch,
+            len(self.generator),
+            time.strftime('%H:%M:%S')))
+
+    def on_epoch_end(self, epoch, logs=None):
+        logs = logs or {}
+        epoch_elapsed = 0.0
+        if self.epoch_start_time is not None:
+            epoch_elapsed = time.time() - self.epoch_start_time
+        train_metrics, val_metrics, other_metrics = self._group_epoch_metrics(logs)
+        self._append_batch_log('epoch {} end | duration: {}'.format(
+            self.current_epoch, self._format_duration(epoch_elapsed)))
+        if train_metrics:
+            self._append_batch_log('  train: {}'.format(' | '.join(train_metrics)))
+        if val_metrics:
+            self._append_batch_log('  val:   {}'.format(' | '.join(val_metrics)))
+        else:
+            self._append_batch_log('  val:   (no validation metrics in logs)')
+        if other_metrics:
+            self._append_batch_log('  other: {}'.format(' | '.join(other_metrics)))
+        if self.train_start_time is not None:
+            total_elapsed = time.time() - self.train_start_time
+            self._append_batch_log('  elapsed_total: {}'.format(self._format_duration(total_elapsed)))
 
     def _progress_bar(self, batch_number):
         total_batches = max(len(self.generator), 1)
@@ -249,7 +316,8 @@ class BatchDebugCallback(tf.keras.callbacks.Callback):
         loss = float(logs.get('loss', 0.0))
         accuracy = logs.get('accuracy', logs.get('sparse_categorical_accuracy', 0.0))
         accuracy = float(accuracy)
-        message = '{}/{} [{}] - ETA: {} - loss: {:.4f} - accuracy: {:.4f}'.format(
+        message = 'epoch {} - batch {}/{} [{}] - ETA: {} - loss: {:.4f} - accuracy: {:.4f}'.format(
+            self.current_epoch,
             batch_number,
             total_batches,
             self._progress_bar(batch_number),
@@ -257,8 +325,7 @@ class BatchDebugCallback(tf.keras.callbacks.Callback):
             loss,
             accuracy
         )
-        with open(os.path.join(self.batch_log_dir, 'training_batches.txt'), 'a') as f:
-            f.write('epoch {} - {}\n'.format(self.current_epoch, message))
+        self._append_batch_log(message)
 
 
 def get_multiclass_labels(data_bundle):
@@ -484,6 +551,96 @@ def _render_preview_tile(img, box, crop_type, enlarge_ratio, target_dim):
     return cv2.resize(cropped, (tw, th), interpolation=cv2.INTER_AREA)
 
 
+def _visual_tile_size(target_dim):
+    if isinstance(target_dim, (list, tuple)) and len(target_dim) >= 2:
+        return max(1, int(target_dim[0])), max(1, int(target_dim[1]))
+    side = max(1, int(target_dim))
+    return side, side
+
+
+def _draw_multiline_overlay(img_bgr, lines, anchor='top'):
+    if img_bgr is None or not lines:
+        return img_bgr
+    img = img_bgr.copy()
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = max(0.4, min(img.shape[1], img.shape[0]) / 600.0 * 0.55)
+    thickness = max(1, int(round(scale * 2)))
+    line_h = max(16, int(round(22 * scale / 0.55)))
+    pad = 6
+    max_w = 0
+    for text, _ in lines:
+        text_w, _ = cv2.getTextSize(str(text), font, scale, thickness)[0]
+        max_w = max(max_w, text_w)
+    bar_h = pad * 2 + line_h * len(lines)
+    bar_w = min(img.shape[1], max_w + pad * 2)
+    y0 = 0 if anchor == 'top' else max(0, img.shape[0] - bar_h)
+    overlay = img.copy()
+    cv2.rectangle(overlay, (0, y0), (bar_w, y0 + bar_h), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.65, img, 0.35, 0, img)
+    for line_idx, (text, color) in enumerate(lines):
+        y = y0 + pad + int((line_idx + 1) * line_h * 0.85)
+        cv2.putText(
+            img, str(text), (pad, y), font, scale, color, thickness, cv2.LINE_AA)
+    return img
+
+
+def _inference_overlay_lines(true_class, pred_class, confidence):
+    correct = int(true_class) == int(pred_class)
+    true_name = _motion_class_name(true_class)
+    pred_name = _motion_class_name(pred_class)
+    true_color = (0, 255, 0)
+    pred_color = (0, 255, 0) if correct else (0, 0, 255)
+    return [
+        ("TRUE: {} ({})".format(true_name, int(true_class)), true_color),
+        ("PRED: {} ({}) conf={:.3f}".format(pred_name, int(pred_class), float(confidence)), pred_color),
+    ]
+
+
+def _extract_view_region(img, box, view='context', enlarge_ratio=1.5):
+    if img is None:
+        return None, None
+    h, w = img.shape[:2]
+    x1, y1, x2, y2 = _safe_bbox_int(box, w, h)
+    if view == 'full':
+        return img.copy(), (x1, y1, x2, y2)
+    if view == 'context':
+        cx1, cy1, cx2, cy2 = _context_bbox([x1, y1, x2, y2], w, h, enlarge_ratio=enlarge_ratio)
+        crop = img[cy1:cy2 + 1, cx1:cx2 + 1].copy()
+        rel_box = (x1 - cx1, y1 - cy1, x2 - cx1, y2 - cy1)
+        return crop, rel_box
+    if view == 'crop':
+        crop = img[y1:y2 + 1, x1:x2 + 1].copy()
+        return crop, (0, 0, crop.shape[1] - 1, crop.shape[0] - 1)
+    return img.copy(), (x1, y1, x2, y2)
+
+
+def _render_annotated_preview_tile(
+        img,
+        box,
+        view='context',
+        enlarge_ratio=1.5,
+        target_dim=(224, 224),
+        annotation_lines=None,
+        frame_label=None,
+        highlight_bbox=True):
+    crop, rel_box = _extract_view_region(
+        img, box, view=view, enlarge_ratio=enlarge_ratio)
+    if crop is None:
+        return None
+    out = crop.copy()
+    if highlight_bbox and rel_box is not None:
+        bx1, by1, bx2, by2 = rel_box
+        thickness = max(2, int(round(min(out.shape[:2]) / 120.0)))
+        cv2.rectangle(out, (bx1, by1), (bx2, by2), (0, 255, 255), thickness)
+    if frame_label:
+        out = _draw_multiline_overlay(
+            out, [(str(frame_label), (200, 200, 200))], anchor='bottom')
+    if annotation_lines:
+        out = _draw_multiline_overlay(out, annotation_lines, anchor='top')
+    tw, th = _visual_tile_size(target_dim)
+    return cv2.resize(out, (tw, th), interpolation=cv2.INTER_AREA)
+
+
 def _sample_diverse_indices(total, count):
     if total <= 0 or count <= 0:
         return []
@@ -531,7 +688,10 @@ def _save_visual_inference_samples(
         crop_type='bbox',
         enlarge_ratio=1.5,
         target_dim=(224, 224),
-        draw_header=False):
+        draw_header=False,
+        annotate=True,
+        view='context',
+        tile_size=360):
     if sample_count <= 0:
         return
     if not data_raw or 'image' not in data_raw or 'bbox' not in data_raw:
@@ -558,26 +718,46 @@ def _save_visual_inference_samples(
         k = min(num_frames, len(seq_imgs))
         frames = list(zip(seq_imgs[-k:], seq_boxes[-k:]))
         rendered = []
-        for frame_path, box in frames:
+        true_class = int(y_true[i])
+        pred_class = int(y_pred[i])
+        conf = float(y_scores[i][pred_class])
+        pred_token = str(pred_class)
+        inference_lines = _inference_overlay_lines(true_class, pred_class, conf)
+        for frame_idx, (frame_path, box) in enumerate(frames):
             img = _safe_imread(frame_path)
             if img is None:
                 rendered.append(None)
                 continue
-            rendered.append(_render_preview_tile(
-                img, box, crop_type=crop_type, enlarge_ratio=enlarge_ratio, target_dim=target_dim))
+            is_last = frame_idx == len(frames) - 1
+            if annotate:
+                frame_label = "t{:02d}".format(len(seq_imgs) - k + frame_idx)
+                rendered.append(_render_annotated_preview_tile(
+                    img,
+                    box,
+                    view=view,
+                    enlarge_ratio=enlarge_ratio,
+                    target_dim=target_dim,
+                    annotation_lines=inference_lines if is_last else None,
+                    frame_label=frame_label,
+                    highlight_bbox=True))
+            else:
+                rendered.append(_render_preview_tile(
+                    img, box, crop_type=crop_type, enlarge_ratio=enlarge_ratio, target_dim=target_dim))
 
         last_frame_path = seq_imgs[-1]
         record, drive, frame_name = _extract_record_drive_frame(last_frame_path)
-        conf = float(y_scores[i][int(y_pred[i])])
-        pred_token = str(int(y_pred[i]))
-        header = "idx={} true={} pred={} conf={:.3f} crop={} {} {} {}".format(
-            int(i), int(y_true[i]), pred_token, conf, crop_type, record, drive, frame_name)
-        mosaic = _mosaic_grid(rendered, rows=3, cols=3, tile_size=360)
+        true_name = _motion_class_name(true_class)
+        pred_name = _motion_class_name(pred_class)
+        view_token = view if annotate else crop_type
+        header = "idx={} true={} ({}) pred={} ({}) conf={:.3f} view={} {} {} {}".format(
+            int(i), true_class, true_name, pred_class, pred_name, conf,
+            view_token, record, drive, frame_name)
+        mosaic = _mosaic_grid(rendered, rows=3, cols=3, tile_size=int(tile_size))
         if draw_header:
             mosaic = _draw_label(mosaic, header)
         out_name = "test_sample_{:03d}_idx{:05d}_{}_{}_{}_t{}_p{}_c{:.3f}.jpg".format(
             int(out_i), int(i), record, drive, os.path.splitext(frame_name)[0],
-            int(y_true[i]), pred_token, conf)
+            true_class, pred_token, conf)
         out_path = os.path.join(out_dir, out_name)
         cv2.imwrite(out_path, mosaic)
         print("  saved:", out_path)
@@ -646,6 +826,13 @@ def _evaluate_multiclass_motion_test(config_path, configs, model_opts, test_data
         visual_crop_type = model_opts.get('visual_sample_crop_type', 'auto')
         if visual_crop_type == 'auto':
             visual_crop_type = _resolve_visual_crop_type(model_opts.get('obs_input_type', []))
+        visual_annotate = bool(model_opts.get('visual_sample_annotate', True))
+        visual_view = model_opts.get('visual_sample_view', 'context')
+        if visual_view == 'auto':
+            visual_view = 'context' if visual_annotate else visual_crop_type
+        draw_header = model_opts.get('visual_sample_draw_header')
+        if draw_header is None:
+            draw_header = visual_annotate
         _save_visual_inference_samples(
             data_raw_test,
             y_true,
@@ -659,7 +846,10 @@ def _evaluate_multiclass_motion_test(config_path, configs, model_opts, test_data
             crop_type=visual_crop_type,
             enlarge_ratio=float(model_opts.get('enlarge_ratio', 1.5)),
             target_dim=model_opts.get('target_dim', (224, 224)),
-            draw_header=bool(model_opts.get('visual_sample_draw_header', False)),
+            draw_header=bool(draw_header),
+            annotate=visual_annotate,
+            view=visual_view,
+            tile_size=int(model_opts.get('visual_sample_tile_size', 360)),
         )
 
 

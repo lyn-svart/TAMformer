@@ -25,7 +25,7 @@ model_opts:
   generator: True
   batch_size: 8
   val_batch_size: 8
-  dropout: 0.1
+  dropout: 0.5
   classifier_activation: linear
   classifier_loss: weighted_focal_loss
   focal_gamma: 1.5
@@ -50,7 +50,10 @@ model_opts:
   visual_sample_frames: 9
   visual_sample_out_dir: ./models/visual_samples
   visual_sample_crop_type: auto
-  visual_sample_draw_header: false
+  visual_sample_annotate: true
+  visual_sample_view: context   # full | context | crop (context = vehicle bbox + surroundings)
+  visual_sample_draw_header: true
+  visual_sample_tile_size: 360
   step: 1
   feat_size: [4, 512]
   target_dim: [224, 224]
@@ -59,7 +62,7 @@ model_opts:
   partial_weight_loading: True
 data_opts:
   train_annotation_file: /home/bkaradurak/Projects/ObjectMotionDetection/02-Source/PreventionData/Train.json
-  validation_annotation_file: /home/bkaradurak/Projects/ObjectMotionDetection/02-Source/PreventionData/Validation.json
+  validation_annotation_file: /home/bkaradurak/Projects/ObjectMotionDetection/02-Source/PreventionData/Test.json
   test_annotation_file: /home/bkaradurak/Projects/ObjectMotionDetection/02-Source/PreventionData/Test.json
   path_to_dataset: /home/bkaradurak/Projects/ObjectMotionDetection/02-Source/PreventionData/
   object_types: []
