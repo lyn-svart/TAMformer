@@ -122,6 +122,77 @@ def checkpoint_monitor_settings(model_opts):
     return monitor, mode
 
 
+def resolve_validation_monitor(monitor):
+    monitor = str(monitor)
+    if monitor.startswith('val_'):
+        return monitor
+    known = {
+        'loss': 'val_loss',
+        'accuracy': 'val_accuracy',
+        'sparse_categorical_accuracy': 'val_accuracy',
+    }
+    return known.get(monitor, 'val_' + monitor)
+
+
+def early_stopping_settings(model_opts):
+    patience = int(model_opts.get('early_stopping_patience', 0))
+    if patience <= 0:
+        return None
+
+    checkpoint_monitor, checkpoint_mode = checkpoint_monitor_settings(model_opts)
+    monitor_cfg = model_opts.get('early_stopping_monitor', 'auto')
+    if monitor_cfg in (None, '', 'auto'):
+        monitor = resolve_validation_monitor(checkpoint_monitor)
+    else:
+        monitor = resolve_validation_monitor(monitor_cfg)
+
+    mode_cfg = model_opts.get('early_stopping_mode', 'auto')
+    if mode_cfg in (None, '', 'auto'):
+        mode = checkpoint_mode if monitor_cfg in (None, '', 'auto') else (
+            'min' if monitor.endswith('loss') else 'max')
+    else:
+        mode = mode_cfg
+
+    return {
+        'monitor': monitor,
+        'mode': mode,
+        'patience': patience,
+        'min_delta': float(model_opts.get('early_stopping_min_delta', 0.0)),
+    }
+
+
+class LoggingEarlyStopping(tf.keras.callbacks.EarlyStopping):
+    def __init__(self, log_fn=None, **kwargs):
+        super(LoggingEarlyStopping, self).__init__(**kwargs)
+        self.log_fn = log_fn
+
+    def on_train_begin(self, logs=None):
+        super(LoggingEarlyStopping, self).on_train_begin(logs)
+        if self.log_fn:
+            self.log_fn(
+                'Early stopping enabled: monitor={} mode={} patience={} min_delta={}'.format(
+                    self.monitor, self.mode, self.patience, self.min_delta))
+
+    def on_epoch_end(self, epoch, logs=None):
+        super(LoggingEarlyStopping, self).on_epoch_end(epoch, logs)
+        if not self.log_fn or self.wait <= 0:
+            return
+        current = None
+        if logs and self.monitor in logs:
+            current = logs[self.monitor]
+        current_text = '{:.6f}'.format(float(current)) if current is not None else 'n/a'
+        self.log_fn(
+            'epoch {} early-stop patience: {}/{} | {}={} | best={:.6f}'.format(
+                epoch + 1, self.wait, self.patience, self.monitor, current_text, self.best))
+
+    def on_train_end(self, logs=None):
+        super(LoggingEarlyStopping, self).on_train_end(logs)
+        if self.log_fn and self.stopped_epoch > 0:
+            self.log_fn(
+                'EARLY STOPPING triggered at epoch {} | best {}={:.6f} | patience={}'.format(
+                    self.stopped_epoch, self.monitor, self.best, self.patience))
+
+
 def image_output_dir(model_opts, name):
     base_dir = model_opts.get('debug_output_dir',
                               os.path.join(model_opts['model_path'], 'debug_outputs'))
@@ -974,6 +1045,23 @@ def run(config_path, auxiliary_loss, test, resume, fresh=False, test_epoch=None)
                                             image_output_dir(configs['model_opts'], prefix),
                                             log_interval=configs['model_opts'].get('batch_log_interval', 50),
                                             sample_count=configs['model_opts'].get('debug_sample_count', 3))
+        callbacks = [epoch_checkpoint_callback, best_checkpoint_callback, debug_callback]
+        es_settings = early_stopping_settings(configs['model_opts'])
+        if es_settings is not None:
+            print("Early stopping: monitor={} mode={} patience={} min_delta={}".format(
+                es_settings['monitor'],
+                es_settings['mode'],
+                es_settings['patience'],
+                es_settings['min_delta']))
+            callbacks.append(LoggingEarlyStopping(
+                log_fn=debug_callback._append_batch_log,
+                monitor=es_settings['monitor'],
+                mode=es_settings['mode'],
+                patience=es_settings['patience'],
+                min_delta=es_settings['min_delta'],
+                verbose=1,
+                restore_best_weights=False,
+            ))
         history = tamformer.fit(x=data_train['data'][0],
                                 y=None,
                                 batch_size=configs['model_opts']['batch_size'],
@@ -981,9 +1069,7 @@ def run(config_path, auxiliary_loss, test, resume, fresh=False, test_epoch=None)
                                 initial_epoch=initial_epoch,
                                 validation_data=val_data['data'][0],
                                 verbose=1,
-                                callbacks=[epoch_checkpoint_callback,
-                                           best_checkpoint_callback,
-                                           debug_callback])
+                                callbacks=callbacks)
         loaded_weights_path = resolve_eval_weights_path(ckpt_dir, prefix, model_name)
         print("Loading best weights for evaluation: {} ...".format(loaded_weights_path))
         tamformer.load_weights(loaded_weights_path)

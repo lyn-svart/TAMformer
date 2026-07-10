@@ -23,8 +23,8 @@ model_opts:
   normalize_boxes: True
   data_augmentation: False
   generator: True
-  batch_size: 8
-  val_batch_size: 8
+  batch_size: 16
+  val_batch_size: 16
   dropout: 0.5
   classifier_activation: linear
   classifier_loss: weighted_focal_loss
@@ -41,6 +41,10 @@ model_opts:
   checkpoint_dir: ./models/checkpoints
   checkpoint_monitor: loss  # metric for best-model selection (e.g. val_accuracy)
   checkpoint_mode: min          # min for loss metrics, max for accuracy metrics
+  early_stopping_patience: 10   # stop if no val improvement for N epochs (0 = disabled)
+  early_stopping_min_delta: 0.0
+  early_stopping_monitor: auto  # auto = val version of checkpoint_monitor
+  early_stopping_mode: auto     # auto | min | max
   debug_output_dir: ./models/debug_outputs
   batch_log_interval: 1000
   debug_sample_count: 3
