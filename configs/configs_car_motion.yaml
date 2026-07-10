@@ -95,6 +95,6 @@ data_opts:
     ra-yield: 19
     intent to cross: 20
   class_id_map: {}
-  fstride: 1
+  fstride: 4
   seq_type: motion
   min_track_size: 10

@@ -104,8 +104,6 @@ class CarMotion(object):
             for start in range(0, len(entries) - seq_len + 1, stride):
                 window = entries[start:start + seq_len]
                 label = window[-1]['label']
-                if any(item['label'] != label for item in window):
-                    continue
                 images.append([self._resolve_path(item['frame_path']) for item in window])
                 bboxes.append([item['bbox'] for item in window])
                 pids.append([[track_id] for _ in range(seq_len)])
