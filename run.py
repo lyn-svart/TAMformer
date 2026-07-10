@@ -784,15 +784,6 @@ def run(config_path, auxiliary_loss, test, resume, fresh=False, test_epoch=None)
                                             image_output_dir(configs['model_opts'], prefix),
                                             log_interval=configs['model_opts'].get('batch_log_interval', 50),
                                             sample_count=configs['model_opts'].get('debug_sample_count', 3))
-        fit_workers = configs['model_opts'].get('fit_workers', 4)
-        fit_max_queue_size = configs['model_opts'].get('fit_max_queue_size', 10)
-        fit_kwargs = {}
-        if fit_workers > 0:
-            fit_kwargs['workers'] = fit_workers
-            fit_kwargs['use_multiprocessing'] = True
-            fit_kwargs['max_queue_size'] = fit_max_queue_size
-            print("Data loading: workers={}, max_queue_size={}".format(
-                fit_workers, fit_max_queue_size))
         history = tamformer.fit(x=data_train['data'][0],
                                 y=None,
                                 batch_size=configs['model_opts']['batch_size'],
@@ -802,8 +793,7 @@ def run(config_path, auxiliary_loss, test, resume, fresh=False, test_epoch=None)
                                 verbose=1,
                                 callbacks=[epoch_checkpoint_callback,
                                            best_checkpoint_callback,
-                                           debug_callback],
-                                **fit_kwargs)
+                                           debug_callback])
         loaded_weights_path = resolve_eval_weights_path(ckpt_dir, prefix, model_name)
         print("Loading best weights for evaluation: {} ...".format(loaded_weights_path))
         tamformer.load_weights(loaded_weights_path)
