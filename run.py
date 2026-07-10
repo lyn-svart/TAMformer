@@ -163,15 +163,22 @@ def early_stopping_settings(model_opts):
 
 class LoggingEarlyStopping(tf.keras.callbacks.EarlyStopping):
     def __init__(self, log_fn=None, **kwargs):
-        super(LoggingEarlyStopping, self).__init__(**kwargs)
         self.log_fn = log_fn
+        self._log_monitor = kwargs.get('monitor', 'val_loss')
+        self._log_mode = kwargs.get('mode', 'auto')
+        self._log_patience = kwargs.get('patience', 0)
+        self._log_min_delta = kwargs.get('min_delta', 0)
+        super(LoggingEarlyStopping, self).__init__(**kwargs)
 
     def on_train_begin(self, logs=None):
         super(LoggingEarlyStopping, self).on_train_begin(logs)
         if self.log_fn:
             self.log_fn(
                 'Early stopping enabled: monitor={} mode={} patience={} min_delta={}'.format(
-                    self.monitor, self.mode, self.patience, self.min_delta))
+                    self._log_monitor,
+                    self._log_mode,
+                    self._log_patience,
+                    self._log_min_delta))
 
     def on_epoch_end(self, epoch, logs=None):
         super(LoggingEarlyStopping, self).on_epoch_end(epoch, logs)
