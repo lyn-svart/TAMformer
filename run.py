@@ -66,6 +66,67 @@ def get_checkpoint_dir(model_opts):
                           os.path.join(model_opts['model_path'], 'checkpoints'))
 
 
+def _checkpoint_run_dirs(checkpoint_base_dir):
+    if not os.path.isdir(checkpoint_base_dir):
+        return []
+    run_re = re.compile(r'^run(\d+)-(\d{8})$')
+    runs = []
+    for name in os.listdir(checkpoint_base_dir):
+        path = os.path.join(checkpoint_base_dir, name)
+        match = run_re.match(name)
+        if match and os.path.isdir(path):
+            runs.append((int(match.group(1)), path))
+    return sorted(runs, key=lambda item: item[0])
+
+
+def create_checkpoint_run_dir(checkpoint_base_dir):
+    os.makedirs(checkpoint_base_dir, exist_ok=True)
+    runs = _checkpoint_run_dirs(checkpoint_base_dir)
+    next_run = runs[-1][0] + 1 if runs else 1
+    date_token = time.strftime('%Y%m%d')
+    while True:
+        run_dir = os.path.join(
+            checkpoint_base_dir, 'run{}-{}'.format(next_run, date_token))
+        try:
+            os.makedirs(run_dir)
+            return run_dir
+        except FileExistsError:
+            next_run += 1
+
+
+def latest_checkpoint_run_dir(checkpoint_base_dir, prefix):
+    for _, run_dir in reversed(_checkpoint_run_dirs(checkpoint_base_dir)):
+        best_path = best_checkpoint_path(run_dir, prefix)
+        checkpoint_path, _ = latest_checkpoint(run_dir, prefix)
+        if os.path.isfile(best_path) or checkpoint_path is not None:
+            return run_dir
+    return None
+
+
+def select_checkpoint_dir(model_opts, prefix, fresh=False, test=False, resume=False):
+    checkpoint_base_dir = get_checkpoint_dir(model_opts)
+    os.makedirs(checkpoint_base_dir, exist_ok=True)
+
+    if fresh:
+        return create_checkpoint_run_dir(checkpoint_base_dir)
+
+    latest_run_dir = latest_checkpoint_run_dir(checkpoint_base_dir, prefix)
+    if latest_run_dir is not None:
+        return latest_run_dir
+
+    # Backward compatibility for checkpoints created before per-run directories.
+    legacy_best = best_checkpoint_path(checkpoint_base_dir, prefix)
+    legacy_checkpoint, _ = latest_checkpoint(checkpoint_base_dir, prefix)
+    if os.path.isfile(legacy_best) or legacy_checkpoint is not None:
+        return checkpoint_base_dir
+
+    if test or resume:
+        return checkpoint_base_dir
+
+    # No previous checkpoint means this is a new training run even without --fresh.
+    return create_checkpoint_run_dir(checkpoint_base_dir)
+
+
 def latest_checkpoint(checkpoint_dir, prefix):
     pattern = os.path.join(checkpoint_dir, prefix + '_epoch_*.h5')
     checkpoints = glob.glob(pattern)
@@ -99,6 +160,18 @@ def resolve_test_weights_path(checkpoint_dir, prefix, model_name, test_epoch=Non
                 'Checkpoint for epoch {} not found: {}'.format(test_epoch, epoch_path))
         return epoch_path
     return resolve_eval_weights_path(checkpoint_dir, prefix, model_name)
+
+
+def resolve_manual_weights_path(weights_path):
+    expanded_path = os.path.abspath(os.path.expanduser(str(weights_path)))
+    candidates = [expanded_path]
+    if not os.path.splitext(expanded_path)[1]:
+        candidates.append(expanded_path + '.h5')
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    raise FileNotFoundError(
+        'Manual test weights not found. Checked: {}'.format(', '.join(candidates)))
 
 
 def resolve_eval_weights_path(checkpoint_dir, prefix, model_name):
@@ -931,9 +1004,17 @@ def _evaluate_multiclass_motion_test(config_path, configs, model_opts, test_data
         )
 
 
-def run(config_path, auxiliary_loss, test, resume, fresh=False, test_epoch=None):
+def run(config_path, auxiliary_loss, test, resume, fresh=False, test_epoch=None,
+        test_weights=None):
     with open(config_path, 'r') as f:
         configs = yaml.safe_load(f)
+
+    if test_weights is not None and not test:
+        raise ValueError('--test_weights can only be used with --test')
+    if test_weights is not None and test_epoch is not None:
+        raise ValueError('--test_weights and --test_epoch cannot be used together')
+    manual_test_weights = (
+        resolve_manual_weights_path(test_weights) if test_weights is not None else None)
 
     print(configs['model_opts']['dataset'], '--------------------------------------')
     tte = configs['model_opts']['time_to_event']
@@ -972,9 +1053,19 @@ def run(config_path, auxiliary_loss, test, resume, fresh=False, test_epoch=None)
                  +'_'.join(configs['model_opts']['obs_input_type'])+'_'\
                  +str(configs['model_opts']['lr'])+'.h5'
     os.makedirs(configs['model_opts']['model_path'], exist_ok=True)
-    ckpt_dir = get_checkpoint_dir(configs['model_opts'])
-    os.makedirs(ckpt_dir, exist_ok=True)
     prefix = checkpoint_prefix(model_name)
+    if manual_test_weights is not None:
+        ckpt_dir = os.path.dirname(manual_test_weights)
+        print("Manual test weights:", manual_test_weights)
+    else:
+        ckpt_dir = select_checkpoint_dir(
+            configs['model_opts'],
+            prefix,
+            fresh=fresh,
+            test=test,
+            resume=resume,
+        )
+        print("Checkpoint run directory:", ckpt_dir)
     checkpoint_path, checkpoint_epoch = latest_checkpoint(ckpt_dir, prefix)
     initial_epoch = 0
     loaded_weights_path = model_name
@@ -984,7 +1075,11 @@ def run(config_path, auxiliary_loss, test, resume, fresh=False, test_epoch=None)
 
     if test or resume:
         if test:
-            weights_to_load = resolve_test_weights_path(ckpt_dir, prefix, model_name, test_epoch)
+            weights_to_load = (
+                manual_test_weights
+                if manual_test_weights is not None
+                else resolve_test_weights_path(
+                    ckpt_dir, prefix, model_name, test_epoch))
         else:
             weights_to_load = checkpoint_path if checkpoint_path is not None else model_name
         loaded_weights_path = weights_to_load
@@ -997,10 +1092,7 @@ def run(config_path, auxiliary_loss, test, resume, fresh=False, test_epoch=None)
         tamformer.load_weights(checkpoint_path)
         initial_epoch = checkpoint_epoch
     elif fresh:
-        print("Fresh training requested; existing checkpoints will be ignored.")
-        best_path = best_checkpoint_path(ckpt_dir, prefix)
-        if os.path.isfile(best_path):
-            os.remove(best_path)
+        print("Fresh training requested; checkpoints will be saved to the new run directory.")
     if not test:
         optimizer = get_optimizer(configs['model_opts']['optimizer'])(learning_rate=configs['model_opts']['lr'])
         if configs['model_opts'].get('label_format') == 'multiclass':
@@ -1203,6 +1295,17 @@ if __name__ == '__main__':
                         help='Start training from scratch and ignore existing checkpoints')
     parser.add_argument('--test_epoch', type=int, default=None,
                         help='Epoch checkpoint to load for --test (e.g. 5 loads epoch_005.h5)')
+    parser.add_argument(
+        '--test_weights', type=str, default=None,
+        help='Exact weights file to load for --test; bypasses automatic run/best selection')
 
     args = parser.parse_args()
-    run(args.config_file, args.auxiliary_loss, args.test, args.resume, args.fresh, args.test_epoch)
+    run(
+        args.config_file,
+        args.auxiliary_loss,
+        args.test,
+        args.resume,
+        args.fresh,
+        args.test_epoch,
+        args.test_weights,
+    )

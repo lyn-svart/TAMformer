@@ -38,7 +38,7 @@ model_opts:
   optimizer: adam
   lr: 0.0001
   model_path: ./models
-  checkpoint_dir: ./models/checkpoints
+  checkpoint_dir: ./models/checkpoints  # fresh runs create runN-YYYYMMDD subdirectories
   checkpoint_monitor: loss  # metric for best-model selection (e.g. val_accuracy)
   checkpoint_mode: min          # min for loss metrics, max for accuracy metrics
   early_stopping_patience: 10   # stop if no val improvement for N epochs (0 = disabled)
