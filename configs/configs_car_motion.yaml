@@ -58,6 +58,7 @@ model_opts:
   visual_sample_view: context   # full | context | crop (context = vehicle bbox + surroundings)
   visual_sample_draw_header: true
   visual_sample_tile_size: 360
+  crop_preview_out_dir: ./models/crop_previews
   step: 1
   feat_size: [4, 512]
   target_dim: [224, 224]

@@ -201,15 +201,19 @@ class CarMotion(object):
         return str(motion).strip().lower()
 
     def _xywh_to_xyxy(self, obj):
-        x, y, w, h = obj['xywh']
-        if max(x, y, w, h) <= 1.0:
-            width = obj.get('img_width', 1)
-            height = obj.get('img_height', 1)
-            x *= width
-            w *= width
-            y *= height
-            h *= height
-        return [x, y, x + w, y + h]
+        cx, cy, w, h = [float(v) for v in obj['xywh']]
+        img_w = float(obj.get('img_width', 1) or 1)
+        img_h = float(obj.get('img_height', 1) or 1)
+        if max(cx, cy, w, h) <= 1.0:
+            cx *= img_w
+            w *= img_w
+            cy *= img_h
+            h *= img_h
+        x1 = cx - w / 2.0
+        y1 = cy - h / 2.0
+        x2 = cx + w / 2.0
+        y2 = cy + h / 2.0
+        return [x1, y1, x2, y2]
 
     def _drive_id(self, frame_path):
         parts = frame_path.replace('\\', '/').split('/')
