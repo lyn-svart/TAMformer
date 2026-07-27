@@ -348,13 +348,15 @@ def save_inference_samples(generator, input_types, output_dir, predictions=None,
 
 
 class BatchDebugCallback(tf.keras.callbacks.Callback):
-    def __init__(self, generator, input_types, output_dir, log_interval=50, sample_count=3):
+    def __init__(self, generator, input_types, output_dir, log_interval=50, sample_count=3,
+                 model_opts=None):
         super(BatchDebugCallback, self).__init__()
         self.generator = generator
         self.input_types = input_types
         self.output_dir = output_dir
         self.log_interval = log_interval
         self.sample_count = sample_count
+        self.model_opts = model_opts or {}
         self.current_epoch = 0
         self.epoch_start_time = None
         self.train_start_time = None
@@ -396,6 +398,36 @@ class BatchDebugCallback(tf.keras.callbacks.Callback):
                 other_metrics.append(entry)
         return train_metrics, val_metrics, other_metrics
 
+    def _log_training_parameters(self):
+        parameter_keys = (
+            ('optimizer', 'optimizer'),
+            ('learning_rate', 'lr'),
+            ('epochs', 'epochs'),
+            ('batch_size', 'batch_size'),
+            ('validation_batch_size', 'val_batch_size'),
+            ('classifier_loss', 'classifier_loss'),
+            ('focal_gamma', 'focal_gamma'),
+            ('dropout', 'dropout'),
+            ('backbone', 'backbone'),
+            ('backbone_weights', 'backbone_weights'),
+            ('trainable_backbone', 'trainable_backbone'),
+            ('freeze_backbone', 'freeze_backbone'),
+            ('enabled_modalities', 'enabled_modalities'),
+            ('sequence_length', 'sequence_length'),
+            ('num_classes', 'num_classes'),
+            ('data_augmentation', 'data_augmentation'),
+            ('balance_data', 'balance_data'),
+            ('apply_class_weights', 'apply_class_weights'),
+            ('checkpoint_monitor', 'checkpoint_monitor'),
+            ('checkpoint_mode', 'checkpoint_mode'),
+            ('early_stopping_patience', 'early_stopping_patience'),
+            ('early_stopping_min_delta', 'early_stopping_min_delta'),
+        )
+        self._append_batch_log('Training parameters:')
+        for label, config_key in parameter_keys:
+            if config_key in self.model_opts:
+                self._append_batch_log('  {}: {}'.format(label, self.model_opts[config_key]))
+
     def on_train_begin(self, logs=None):
         self.train_start_time = time.time()
         save_random_generator_inputs(self.generator, self.input_types, self.input_image_dir,
@@ -403,6 +435,7 @@ class BatchDebugCallback(tf.keras.callbacks.Callback):
         self._append_batch_log('=' * 72)
         self._append_batch_log('Training started: {}'.format(
             time.strftime('%Y-%m-%d %H:%M:%S')))
+        self._log_training_parameters()
         self._append_batch_log('Total batches per epoch: {}'.format(len(self.generator)))
         self._append_batch_log('Batch log interval: {}'.format(self.log_interval))
         self._append_batch_log('=' * 72)
@@ -1143,7 +1176,8 @@ def run(config_path, auxiliary_loss, test, resume, fresh=False, test_epoch=None,
                                             configs['model_opts']['obs_input_type'],
                                             image_output_dir(configs['model_opts'], prefix),
                                             log_interval=configs['model_opts'].get('batch_log_interval', 50),
-                                            sample_count=configs['model_opts'].get('debug_sample_count', 3))
+                                            sample_count=configs['model_opts'].get('debug_sample_count', 3),
+                                            model_opts=configs['model_opts'])
         callbacks = [epoch_checkpoint_callback, best_checkpoint_callback, debug_callback]
         es_settings = early_stopping_settings(configs['model_opts'])
         if es_settings is not None:

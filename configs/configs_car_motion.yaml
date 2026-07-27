@@ -36,15 +36,15 @@ model_opts:
   print_class_distribution: True
   epochs: 100
   optimizer: adam
-  lr: 0.0001
+  lr: 0.00005
   model_path: ./models
   checkpoint_dir: ./models/checkpoints  # fresh runs create runN-YYYYMMDD subdirectories
-  checkpoint_monitor: loss  # metric for best-model selection (e.g. val_accuracy)
+  checkpoint_monitor: val_loss  # metric for best-model selection (e.g. val_accuracy)
   checkpoint_mode: min          # min for loss metrics, max for accuracy metrics
-  early_stopping_patience: 10   # stop if no val improvement for N epochs (0 = disabled)
-  early_stopping_min_delta: 0.0
-  early_stopping_monitor: auto  # auto = val version of checkpoint_monitor
-  early_stopping_mode: auto     # auto | min | max
+  early_stopping_patience: 5   # stop if no val improvement for N epochs (0 = disabled)
+  early_stopping_min_delta: 0.002
+  early_stopping_monitor: val_loss  # auto = val version of checkpoint_monitor
+  early_stopping_mode: min     # auto | min | max
   debug_output_dir: ./models/debug_outputs
   batch_log_interval: 1000
   debug_sample_count: 3
